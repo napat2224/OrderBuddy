@@ -8,6 +8,15 @@ runtime:
   timeout_s: 300
 
 profiles:
+  # OrderBuddy: router + vision added; fast/reasoning unchanged.
+  router:
+    model: qwen3:4b-q4_K_M
+    temperature: 0
+    num_ctx: 4096
+    num_predict: 128
+    keep_alive: 30m
+    think: false
+
   fast:
     model: qwen3:4b-q4_K_M
     temperature: 0
@@ -24,6 +33,15 @@ profiles:
     keep_alive: 10m
     think: false
 
+  vision:
+    model: gemma3:4b-it-q4_K_M
+    temperature: 0
+    num_ctx: 8192
+    num_predict: 768
+    keep_alive: 10m
+    # no "think" key: gemma3 has no reasoning mode
+
+  # Not used by OrderBuddy (too slow on 8 GB); kept so the course scripts still run.
   fallback:
     model: gemma3:12b-it-q4_K_M   # offloads on 8 GB: slow, used rarely
     temperature: 0

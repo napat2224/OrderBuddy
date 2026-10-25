@@ -1,0 +1,6 @@
+{
+  "name": "OrderBuddy Kitchen",
+  "delivery_fee": 30,
+  "delivery_zones": ["10110", "10260", "10330", "10400"],
+  "max_qty_per_item": 20
+}
