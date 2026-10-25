@@ -1,0 +1,9 @@
+customer_id,name,tier,credit_limit_thb,balance_thb,email
+C-101,Siam Steel Works,gold,500000,120000,ap@siamsteel.example
+C-102,Chao Phraya Foods,silver,200000,185000,finance@cpfoods.example
+C-103,Lanna Textiles,bronze,80000,0,account@lanna.example
+C-104,Andaman Logistics,gold,750000,310000,billing@andaman.example
+C-105,Isan Agritech,silver,150000,149500,ops@isanagri.example
+C-106,Rattanakosin Clinic,bronze,50000,12000,admin@rclinic.example
+C-107,Mekong Electronics,gold,1000000,640000,ap@mekong.example
+C-108,Pattaya Hotels Group,silver,300000,45000,finance@pattayahg.example

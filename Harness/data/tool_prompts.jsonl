@@ -1,0 +1,10 @@
+{"id": "p01", "prompt": "What is the credit limit of customer C-104?", "expected_tool": "lookup_customer", "expected_args": {"customer_id": "C-104"}}
+{"id": "p02", "prompt": "How much available credit does C-102 have left?", "expected_tool": "lookup_customer", "expected_args": {"customer_id": "C-102"}}
+{"id": "p03", "prompt": "What is 18% of 245,000 baht?", "expected_tool": "calculator", "expected_args": null}
+{"id": "p04", "prompt": "What day of the week is it today in Bangkok?", "expected_tool": "current_datetime", "expected_args": null}
+{"id": "p05", "prompt": "Which tier is Lanna Textiles? Their ID is C-103.", "expected_tool": "lookup_customer", "expected_args": {"customer_id": "C-103"}}
+{"id": "p06", "prompt": "If we split an invoice of 1,284,600 THB into 12 equal payments, how much is each payment?", "expected_tool": "calculator", "expected_args": null}
+{"id": "p07", "prompt": "Give me the billing email for customer C-107.", "expected_tool": "lookup_customer", "expected_args": {"customer_id": "C-107"}}
+{"id": "p08", "prompt": "What is today's date?", "expected_tool": "current_datetime", "expected_args": null}
+{"id": "p09", "prompt": "Customer C-999 wants to know their balance.", "expected_tool": "lookup_customer", "expected_args": {"customer_id": "C-999"}, "note": "customer does not exist: the tool returns an error the model must report"}
+{"id": "p10", "prompt": "What is (37.5 * 1200) - 4,750?", "expected_tool": "calculator", "expected_args": null}

@@ -1,0 +1,20 @@
+{"id": "t01", "text": "Hi, this is C-104. Our invoice INV-2291 was charged twice on the credit card. Please refund one of them.", "expected": {"category": "billing", "priority": 2, "customer_id": "C-104"}}
+{"id": "t02", "text": "URGENT: the ordering portal has been down for all our staff since 8am, we cannot take orders. Customer C-107.", "expected": {"category": "technical", "priority": 3, "customer_id": "C-107"}}
+{"id": "t03", "text": "Can you tell me your office opening hours during Songkran?", "expected": {"category": "other", "priority": 1, "customer_id": null}}
+{"id": "t04", "text": "I forgot my password and the reset email never arrives. My customer number is C-103.", "expected": {"category": "technical", "priority": 2, "customer_id": "C-103"}}
+{"id": "t05", "text": "C-102 again. Why did the price per unit go up from 45 to 52 baht on the latest invoice?", "expected": {"category": "billing", "priority": 2, "customer_id": "C-102"}}
+{"id": "t06", "text": "Payment of 150,000 THB bounced and the bank says the deadline is today at 3pm. Help! (C-105)", "expected": {"category": "billing", "priority": 3, "customer_id": "C-105"}}
+{"id": "t07", "text": "The mobile app crashes every time I open the reports tab. Not urgent, just annoying.", "expected": {"category": "technical", "priority": 1, "customer_id": null}}
+{"id": "t08", "text": "Please update our mailing address to 99 Sukhumvit Rd, Bangkok. Customer C-108.", "expected": {"category": "other", "priority": 1, "customer_id": "C-108"}}
+{"id": "t09", "text": "We need a copy of the tax invoice for March for our auditors, customer C-101.", "expected": {"category": "billing", "priority": 2, "customer_id": "C-101"}}
+{"id": "t10", "text": "Error 500 when uploading CSV files larger than 10 MB. Customer C-106.", "expected": {"category": "technical", "priority": 2, "customer_id": "C-106"}}
+{"id": "t11", "text": "สวัสดีครับ ใบแจ้งหนี้เดือนนี้ยอดเงินไม่ถูกต้อง ลูกค้า C-104", "expected": {"category": "billing", "priority": 2, "customer_id": "C-104"}}
+{"id": "t12", "text": "Our whole production line stopped because your API returns timeouts. We lose money every minute. C-107", "expected": {"category": "technical", "priority": 3, "customer_id": "C-107"}}
+{"id": "t13", "text": "Do you sponsor student hackathons? We are organising one at Chula.", "expected": {"category": "other", "priority": 1, "customer_id": null}}
+{"id": "t14", "text": "Customer C-999 here, we were overcharged last month.", "expected": {"category": "billing", "priority": 2, "customer_id": null}, "note": "C-999 does not exist: triggers the domain rule"}
+{"id": "t15", "text": "EXTREMELY URGENT!!! I want to change the colour of my company logo on the dashboard.", "expected": {"category": "other", "priority": 2, "customer_id": null}, "note": "urgent wording but category other: may trigger the priority rule"}
+{"id": "t16", "text": "Two-factor authentication codes are arriving 10 minutes late, so logins fail. C-101", "expected": {"category": "technical", "priority": 2, "customer_id": "C-101"}}
+{"id": "t17", "text": "Please cancel our subscription at the end of this month and send the final bill. C-103", "expected": {"category": "billing", "priority": 2, "customer_id": "C-103"}}
+{"id": "t18", "text": "Where can I download the user manual in Thai?", "expected": {"category": "other", "priority": 1, "customer_id": null}}
+{"id": "t19", "text": "Hello, customer c-105 here. Refund for the returned sensors has not arrived after 30 days.", "expected": {"category": "billing", "priority": 2, "customer_id": "C-105"}, "note": "lower-case ID"}
+{"id": "t20", "text": "Sync between the warehouse scanner and the web dashboard stopped yesterday; stock numbers are wrong. Customer C-102.", "expected": {"category": "technical", "priority": 3, "customer_id": "C-102"}}

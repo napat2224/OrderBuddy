@@ -1,0 +1,36 @@
+# M2 - Model config
+# Code asks for a profile, never a model tag. Change models here.
+# Pick profiles from your Session 1 benchmark results.
+
+runtime:
+  base_url: http://localhost:11434
+  api: native            # native = Ollama /api/chat ; openai = /v1/chat/completions
+  timeout_s: 300
+
+profiles:
+  fast:
+    model: qwen3:4b-q4_K_M
+    temperature: 0
+    num_ctx: 8192
+    num_predict: 512
+    keep_alive: 10m
+    think: false         # qwen3 reasoning off: faster, cleaner JSON
+
+  reasoning:
+    model: qwen3:8b-q4_K_M
+    temperature: 0
+    num_ctx: 16384
+    num_predict: 1024
+    keep_alive: 10m
+    think: false
+
+  fallback:
+    model: gemma3:12b-it-q4_K_M   # offloads on 8 GB: slow, used rarely
+    temperature: 0
+    num_ctx: 8192
+    num_predict: 512
+    keep_alive: 5m
+    # no "think" key: gemma3 has no reasoning mode
+
+logging:
+  file: logs/calls.jsonl
