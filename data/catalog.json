@@ -1,0 +1,18 @@
+[
+  {"sku": "F001", "name": "กะเพราหมูกรอบ", "aliases": ["กะเพราหมู", "กระเพราหมูกรอบ", "ผัดกะเพรา"],
+   "category": "main", "price": 60,
+   "options": {"spice": ["ไม่เผ็ด", "เผ็ดน้อย", "เผ็ดกลาง", "เผ็ดมาก"]},
+   "addons": {"ไข่ดาว": 10, "ไข่เจียว": 15}},
+  {"sku": "F002", "name": "ข้าวผัดกุ้ง", "aliases": ["ข้าวผัด"],
+   "category": "main", "price": 70, "options": {}, "addons": {"ไข่ดาว": 10}},
+  {"sku": "F003", "name": "ต้มยำกุ้ง", "aliases": ["ต้มยำ"],
+   "category": "main", "price": 120,
+   "options": {"spice": ["เผ็ดน้อย", "เผ็ดกลาง", "เผ็ดมาก"], "style": ["น้ำใส", "น้ำข้น"]},
+   "addons": {}},
+  {"sku": "F004", "name": "ข้าวสวย", "aliases": ["ข้าวเปล่า"],
+   "category": "side", "price": 10, "options": {}, "addons": {}},
+  {"sku": "F005", "name": "ชาเย็น", "aliases": ["ชานม", "ชาเย็นนม"],
+   "category": "drink", "price": 35, "options": {"sweet": ["หวานน้อย", "หวานปกติ"]}, "addons": {}},
+  {"sku": "F006", "name": "ชาไทย", "aliases": ["ชาไทยเย็น"],
+   "category": "drink", "price": 35, "options": {"sweet": ["หวานน้อย", "หวานปกติ"]}, "addons": {}}
+]

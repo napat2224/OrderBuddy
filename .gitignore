@@ -60,3 +60,9 @@ Thumbs.db
 
 # Claude Code local settings
 .claude/settings.local.json
+
+# OrderBuddy runtime data
+drafts/
+sessions/
+orders/
+_to_delete/
