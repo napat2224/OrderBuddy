@@ -214,6 +214,15 @@ class TestReliability(Base):
         a = self.make({MSG_ORDER: ["not json", json.dumps(GOOD_ORDER)]}, config="C2")
         self.assertIn("ไม่เข้าใจ", a.handle(UID, MSG_ORDER)[0])
 
+    def test_invented_phone_is_repaired(self):
+        m = "ข้าวผัดกุ้ง 1 รับเอง โทร 0812345678"
+        bad = order([("ข้าวผัดกุ้ง", 1, {})], phone="0899999999", fulfillment="pickup")
+        good = order([("ข้าวผัดกุ้ง", 1, {})], phone="0812345678", fulfillment="pickup")
+        a = self.make({m: [json.dumps(bad), json.dumps(good)]})
+        self.assertIn("โทร: 0812345678", a.handle(UID, m)[0])
+        self.assertTrue(any("not in the customer" in (e.get("error") or "")
+                            for e in self.events("llm_call")))
+
 
 if __name__ == "__main__":
     unittest.main()

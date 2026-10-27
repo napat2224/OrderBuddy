@@ -29,7 +29,8 @@ Models (profiles in `Harness/config.yaml`): `router` + `fast` = qwen3:4b,
 | `app/agent.py` | Tool-calling loop in RESOLVE (M8) | เปรม |
 | `app/session.py` | Drafts, chat history, orders on disk (M12) | เปรม |
 | `app/main.py`, `app/line_adapter.py` | FastAPI + LINE (M17) | เปรม |
-| `app/router.py` | Intent + profile choice (M10-M11) | ฟลุ๊ค |
+| `app/router.py` | Intent + profile choice: rules, model, guard (M10-M11) | ฟลุ๊ค |
+| `app/checks.py` | Domain checks on model output, reply guard (M5) | ฟลุ๊ค |
 | `app/tools/__init__.py` | The 5 tools (M6) | บีม |
 | `app/catalog.py`, `data/*.json` | Menu, stock, shop settings | บีม |
 | `eval/` | Test tasks, metrics, C1-C3 comparison (M20) | บีม |
@@ -124,4 +125,5 @@ addresses in tests and examples, never real customer data.
 - Customer-facing text is Thai and ends with ครับ.
 - Prices are integer THB.
 - Logs: `Harness/logs/calls.jsonl`; one `run_id` per LINE message. Events: `message`,
-  `route`, `state`, `llm_call`, `tool_call`, `safe_failure`, `agent_error`.
+  `route`, `route_source` (rule / model / guard / fallback), `state`, `llm_call`,
+  `tool_call`, `safe_failure`, `agent_error`.

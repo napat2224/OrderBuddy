@@ -17,15 +17,15 @@ Safety (M19):
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass
 from typing import Optional
 
-from harness import DomainError, Harness, LLMError, ask_structured, build_messages, new_run_id
+from harness import Harness, LLMError, ask_structured, build_messages, new_run_id
 
 from . import router, tools
 from .agent import call_tool, resolve_with_code, resolve_with_model
 from .catalog import catalog, menu_text, stock
+from .checks import clean_reply, extract_check
 from .schemas import DraftOrder, ExtractedItem, ExtractedOrder, OrderLine, RouteResult
 from .session import SessionStore
 
@@ -238,7 +238,8 @@ class OrderAgent:
                         else (profile,))
         res = ask_structured(self.h, msgs, ExtractedOrder, profiles=profiles,
                              max_retry=2 if retry else 0, repair=retry,
-                             domain_check=_check_extracted, prompt_id=p.id, run_id=run_id)
+                             domain_check=extract_check(text, draft, history[-6:], bool(image_b64)),
+                             prompt_id=p.id, run_id=run_id)
         return res.value if res.ok else None
 
     @staticmethod
@@ -320,8 +321,7 @@ class OrderAgent:
                              run_id=run_id, prompt_id=prompt_id)
         except LLMError:
             return fallback
-        reply = re.sub(r"<think>.*?</think>", "", out.content, flags=re.S).strip()
-        return reply[:500] if reply else fallback
+        return clean_reply(out.content, system, fallback)   # price + ending checks
 
     # --------------------------------------------------------- CONFIRM / DONE
     @staticmethod
@@ -359,11 +359,3 @@ class OrderAgent:
     def _log_state(self, run_id, src, dst) -> None:
         self.h.log.write("state", run_id=run_id, src=src, dst=dst)
 
-
-def _check_extracted(order: ExtractedOrder) -> None:
-    """Domain rules for ask_structured (schema already passed)."""
-    if len(order.items) > 15:
-        raise DomainError("too many items: at most 15 lines")
-    names = [i.text.strip() for i in order.items]
-    if any(not n for n in names):
-        raise DomainError("every item needs a menu name in text")
