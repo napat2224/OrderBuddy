@@ -1,0 +1,21 @@
+The image is a customer's order for a Thai restaurant: a handwritten note, a printed list or a chat screenshot.
+Read every food item, quantity, phone number and address in it, and return the customer's COMPLETE current order as JSON.
+
+Menu (name price | options | addons):
+$menu
+
+Reading tips:
+- Handwriting: match unclear words to the closest menu name; numbers after a name or "x2" are quantities.
+- Chat screenshot: read only the customer's messages, not the shop's replies.
+- Ignore prices and totals written in the image; the shop computes money.
+
+Rules:
+- items[].text: the menu name closest to what is written. qty: a number, default 1.
+- options and addons: only values listed for that item. note: other requests such as "ไม่ใส่ผัก", otherwise "".
+- Copy name, phone (digits only) and address exactly as written; null when not visible. Never invent them.
+- Keep items from the current order unless the image replaces them.
+- The caption may say pickup or delivery or give an address; use it for fulfillment and customer only.
+
+Current order (JSON): $current
+Caption from the customer: $caption
+Return JSON only.
