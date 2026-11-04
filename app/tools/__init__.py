@@ -148,7 +148,7 @@ class DraftArgs(BaseModel):
 @tool(permission="write")
 def draft_order_manager(args: DraftArgs) -> Optional[dict]:
     """Read, submit or cancel the customer's draft order. submit turns a confirmed
-    draft into orders/<order_id>.json with status pending_staff."""
+    draft into orders/<order_id>.json with status confirmed and cuts the stock."""
     if _store is None:
         raise RuntimeError("tools.configure(store) was not called")
     draft: Optional[DraftOrder] = _store.get_draft(args.line_user_id)
@@ -162,7 +162,17 @@ def draft_order_manager(args: DraftArgs) -> Optional[dict]:
     # submit: the two safety checks live here as well as in the state machine
     if draft.state != "CONFIRM" or draft.missing or not draft.items:
         raise ValueError(f"not_ready: state={draft.state} missing={draft.missing}")
-    return _store.submit(draft).model_dump(mode="json")
+    qty: dict[str, int] = {}
+    for line in draft.items:
+        qty[line.sku] = qty.get(line.sku, 0) + line.qty
+    short = cat.take_stock(qty)          # stock may have changed since the summary was sent
+    if short:
+        raise ValueError(f"out_of_stock: {short}")
+    try:
+        return _store.submit(draft).model_dump(mode="json")
+    except Exception:
+        cat.return_stock(qty)
+        raise
 
 
 ALL_TOOLS = ["product_search", "stock_checker", "price_calculator",

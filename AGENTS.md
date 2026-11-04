@@ -7,7 +7,7 @@ Read this before you change anything. It is for teammates and for AI coding agen
 
 A local LINE chat-to-order agent for a Thai restaurant (Agentic AI class, Group 01).
 A customer sends text or a photo in LINE -> the agent builds an order with local
-models (Ollama) and 5 tools -> the customer confirms -> staff approve.
+models (Ollama) and 5 tools -> the customer confirms -> the order is final.
 
 ```
 LINE -> ngrok -> app/main.py (/webhook) -> app/state_machine.py
@@ -112,7 +112,8 @@ file, the spec doc and the tests in the same commit.
   is empty AND the newest message has intent `confirm`. The tool checks it again.
 - Money and stock are computed by code (`price_calculator`, `stock_checker`), never by
   a model. Every sku from a model is re-checked against the catalog.
-- Stock is cut only when staff approve (`POST /orders/{id}/approve`).
+- Stock is cut only when an order is submitted (`draft_order_manager` submit), all or
+  nothing. There is no staff review: a confirmed order is final.
 
 ## How to change things
 

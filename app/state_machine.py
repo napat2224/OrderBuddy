@@ -41,7 +41,8 @@ MSG = {
     "ask_items": "ต้องการสั่งเมนูอะไรครับ",
     "cancelled": "ยกเลิกออร์เดอร์ {order_id} แล้วครับ",
     "nothing_to_cancel": "ตอนนี้ยังไม่มีออร์เดอร์ที่ต้องยกเลิกครับ",
-    "submitted": "รับออร์เดอร์ {order_id} แล้วครับ รอร้านยืนยันสักครู่ จะแจ้งกลับทาง LINE นี้ครับ",
+    "submitted": "รับออร์เดอร์ {order_id} แล้วครับ ยอดรวม {total} บาท ขอบคุณครับ",
+    "sold_out_now": "ขออภัยครับ มีเมนูในออร์เดอร์เพิ่งหมด รบกวนพิมพ์รายการที่ต้องการแก้ได้เลยครับ",
     "submit_failed": "ขออภัยครับ ยังส่งออร์เดอร์ไม่ได้ ({reason}) รบกวนตรวจสอบรายการอีกครั้งครับ",
 }
 
@@ -353,9 +354,11 @@ class OrderAgent:
                       run_id=run_id, allowed=READ_WRITE)
         if not r["ok"]:
             draft.state = "CONFIRM"
+            if "out_of_stock" in r["error"]:
+                return [MSG["sold_out_now"]], False
             return [MSG["submit_failed"].format(reason=r["error"][:80])], False
-        self._log_state(run_id, "DONE", "STAFF_REVIEW")
-        return [MSG["submitted"].format(order_id=r["result"]["order_id"])], True
+        return [MSG["submitted"].format(order_id=r["result"]["order_id"],
+                                        total=r["result"]["total"])], True
 
     # ------------------------------------------------------------- helpers
     def _goto(self, run_id, draft: DraftOrder, state: str) -> None:

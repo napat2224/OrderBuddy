@@ -7,6 +7,7 @@ validation and session store all run for real.
     python -m unittest discover -s tests -v        (from the OrderBuddy folder)
 """
 import json
+import shutil
 import sys
 import tempfile
 import unittest
@@ -20,6 +21,7 @@ import app  # noqa: E402,F401  (puts Harness/ on sys.path)
 from harness import ChatResult, Harness, LLMConnectionError  # noqa: E402
 
 from app.session import SessionStore  # noqa: E402
+from app import catalog  # noqa: E402
 from app.debug import format_event, last_run_ids  # noqa: E402
 from app.state_machine import CONFIGS, OrderAgent  # noqa: E402
 from app.trace import TracedHarness  # noqa: E402
@@ -115,6 +117,13 @@ GOOD_ORDER = order([("กะเพราหมูกรอบ", 2, {"options": {
 
 
 class Base(unittest.TestCase):
+    def setUp(self):
+        # confirming an order writes stock.json: work on a copy of data/
+        data = Path(tempfile.mkdtemp())
+        shutil.copytree(catalog.DATA_DIR, data, dirs_exist_ok=True)
+        self.addCleanup(setattr, catalog, "DATA_DIR", catalog.DATA_DIR)
+        catalog.DATA_DIR = data
+
     def make(self, extract, config="C3", **kw):
         tmp = Path(tempfile.mkdtemp())
         self.client = FakeClient(extract, **kw)
@@ -141,7 +150,37 @@ class TestHappyPath(Base):
         orders = list((self.store.orders_dir).glob("*.json"))
         self.assertEqual(len(orders), 1)
         saved = json.loads(orders[0].read_text(encoding="utf-8"))
-        self.assertEqual((saved["status"], saved["total"]), ("pending_staff", 170))
+        self.assertEqual((saved["status"], saved["total"]), ("confirmed", 170))
+        self.assertIn("รวม 170 บาท", r)
+        self.assertEqual(catalog.stock()["F001"], 18)      # 20 - 2, cut when confirmed
+
+    def test_no_stock_is_cut_before_confirm(self):
+        a = self.make({MSG_ORDER: GOOD_ORDER})
+        a.handle(UID, MSG_ORDER)
+        self.assertEqual(catalog.stock()["F001"], 20)
+
+    def test_sold_out_while_waiting_for_confirm(self):
+        a = self.make({MSG_ORDER: GOOD_ORDER})
+        a.handle(UID, MSG_ORDER)
+        catalog._save_stock({**catalog.stock(), "F001": 1})
+        self.assertIn("เพิ่งหมด", a.handle(UID, "ยืนยัน")[0])
+        self.assertEqual(catalog.stock()["F001"], 1)       # nothing cut
+        self.assertFalse(self.store.orders_dir.exists())   # nothing saved
+        self.assertEqual(self.store.get_draft(UID).state, "CONFIRM")   # the customer can still edit
+
+    def test_stock_is_all_or_nothing(self):
+        before = catalog.stock()
+        self.assertEqual(catalog.take_stock({"F001": 1, "F005": 1}), ["F005"])   # F005 is sold out
+        self.assertEqual(catalog.stock(), before)
+
+    def test_stock_returns_when_the_order_cannot_be_saved(self):
+        a = self.make({MSG_ORDER: GOOD_ORDER})
+        a.handle(UID, MSG_ORDER)
+        order_id = self.store.get_draft(UID).order_id
+        self.store.orders_dir.mkdir(parents=True)
+        (self.store.orders_dir / f"{order_id}.json").write_text("{}", encoding="utf-8")
+        a.handle(UID, "ยืนยัน")
+        self.assertEqual(catalog.stock()["F001"], 20)
 
     def test_models_used_per_state(self):
         a = self.make({MSG_ORDER: GOOD_ORDER})

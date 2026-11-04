@@ -33,17 +33,29 @@ def stock() -> dict[str, int]:
     return _load("stock.json")
 
 
-def deduct_stock(qty_by_sku: dict[str, int]) -> dict[str, int]:
-    """Cut stock when staff approve an order (never below 0). Returns the new stock."""
+def _save_stock(s: dict[str, int]) -> None:
+    path = DATA_DIR / "stock.json"
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(s, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def take_stock(qty_by_sku: dict[str, int]) -> list[str]:
+    """Cut stock for one order, all or nothing. Returns the skus that are short (nothing is cut
+    then). The lock covers check and cut together, so two customers cannot get the last one."""
     with _stock_lock:
         s = stock()
-        for sku, qty in qty_by_sku.items():
-            s[sku] = max(0, s.get(sku, 0) - qty)
-        path = DATA_DIR / "stock.json"
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(s, ensure_ascii=False), encoding="utf-8")
-        os.replace(tmp, path)
-        return s
+        short = [sku for sku, qty in qty_by_sku.items() if s.get(sku, 0) < qty]
+        if not short:
+            _save_stock({**s, **{sku: s[sku] - qty for sku, qty in qty_by_sku.items()}})
+        return short
+
+
+def return_stock(qty_by_sku: dict[str, int]) -> None:
+    """Undo take_stock when the order could not be saved."""
+    with _stock_lock:
+        s = stock()
+        _save_stock({**s, **{sku: s.get(sku, 0) + qty for sku, qty in qty_by_sku.items()}})
 
 
 @lru_cache(maxsize=1)

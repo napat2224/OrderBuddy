@@ -5,19 +5,22 @@
     python -m app.debug last [n]                           the last n messages from the log
     python -m app.debug run r-1234abcd                     one message by its run_id
 
-extract and chat need Ollama and also write to Harness/logs/app.log. chat keeps drafts and
-orders in a temp folder, so nothing it does reaches the real drafts/ or orders/. last and
-run only read the log.
+extract and chat need Ollama and also write to Harness/logs/app.log. chat keeps drafts,
+orders and stock in a temp folder, so nothing it does reaches the real drafts/, orders/ or
+data/stock.json. last and run only read the log.
 """
 from __future__ import annotations
 
 import argparse
 import json
 import logging
+import shutil
 import tempfile
+from pathlib import Path
 
 from harness import new_run_id
 
+from . import catalog
 from .schemas import DraftOrder
 from .session import SessionStore
 from .state_machine import OrderAgent
@@ -55,6 +58,9 @@ def last_run_ids(events: list[dict], n: int) -> list[str]:
 def make_agent() -> OrderAgent:
     h = TracedHarness()
     setup_file_log(h.log.path.parent)
+    # confirming an order cuts stock: a practice order must not touch the real file
+    catalog.DATA_DIR = Path(shutil.copytree(catalog.DATA_DIR, tempfile.mkdtemp(),
+                                            dirs_exist_ok=True))
     logging.getLogger("orderbuddy").propagate = False   # log to the file, keep the chat readable
     return OrderAgent(h=h, store=SessionStore(tempfile.mkdtemp()))
 

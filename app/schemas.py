@@ -20,8 +20,8 @@ SKU_PATTERN = r"^F\d{3}$"
 Intent = Literal["new_order", "modify_order", "confirm", "cancel", "question", "other"]
 Fulfillment = Literal["delivery", "pickup"]
 State = Literal["IDLE", "ROUTE", "EXTRACT", "RESOLVE", "CLARIFY", "PRICE",
-                "ADDRESS", "CONFIRM", "DONE", "STAFF_REVIEW", "ERROR"]
-OrderStatus = Literal["pending_staff", "approved", "rejected"]
+                "ADDRESS", "CONFIRM", "DONE", "ERROR"]
+OrderStatus = Literal["confirmed"]
 
 
 class _Strict(BaseModel):
@@ -109,7 +109,7 @@ class FinalOrder(_Strict):
     """Written to orders/<order_id>.json after the customer confirms."""
     order_id: str
     line_user_id: str
-    status: OrderStatus = "pending_staff"
+    status: OrderStatus = "confirmed"
     items: list[OrderLine]
     subtotal: int
     delivery_fee: int
@@ -117,7 +117,6 @@ class FinalOrder(_Strict):
     customer: DraftCustomer
     fulfillment: Fulfillment
     confirmed_at: datetime = Field(default_factory=datetime.now)
-    reviewed_at: Optional[datetime] = None
 
     @classmethod
     def from_draft(cls, d: DraftOrder) -> "FinalOrder":

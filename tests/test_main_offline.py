@@ -1,4 +1,4 @@
-"""Offline tests for the LINE webhook and staff endpoints: no Ollama, no LINE.
+"""Offline tests for the LINE webhook and the orders endpoint: no Ollama, no LINE.
 
 The real OrderAgent runs with the FakeClient models from test_agent_offline,
 and a FakeLine records what would be pushed to LINE.
@@ -9,9 +9,7 @@ import base64
 import hashlib
 import hmac
 import json
-import shutil
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 
@@ -59,18 +57,11 @@ def sign(body):
 
 class TestWebhook(Base):
     def setUp(self):
-        # stock.json is written on approve: work on a copy of data/
-        self.data = Path(tempfile.mkdtemp())
-        shutil.copytree(catalog.DATA_DIR, self.data, dirs_exist_ok=True)
-        self._old_data, catalog.DATA_DIR = catalog.DATA_DIR, self.data
-
+        super().setUp()
         self.agent = self.make({MSG_ORDER: GOOD_ORDER})
         self.line = FakeLine()
         app = create_app(Settings(channel_secret=SECRET, staff_key=STAFF), self.agent, self.line)
         self.http = TestClient(app)
-
-    def tearDown(self):
-        catalog.DATA_DIR = self._old_data
 
     def post(self, body, signature=None):
         return self.http.post("/webhook", content=body,
@@ -84,23 +75,30 @@ class TestWebhook(Base):
     def test_line_verify_button(self):
         self.assertEqual(self.post(line_body()).status_code, 200)
 
-    def test_full_order_through_line_and_staff(self):
+    def test_full_order_through_line(self):
         self.assertEqual(self.post(line_body(text_event(MSG_ORDER, "e1"))).status_code, 200)
         self.assertIn("รวม 170 บาท", self.line.pushed[-1][1][0])
         self.post(line_body(text_event("ยืนยัน", "e2")))
         self.assertIn("รับออร์เดอร์", self.line.pushed[-1][1][0])
+        self.assertIn("ยอดรวม 170 บาท", self.line.pushed[-1][1][0])
+        self.assertEqual(catalog.stock()["F001"], 18)          # 20 - 2
 
         self.assertEqual(self.http.get("/orders").status_code, 401)
-        pending = self.http.get("/orders", headers={"X-Staff-Key": STAFF}).json()
-        self.assertEqual(len(pending), 1)
-        oid = pending[0]["order_id"]
+        orders = self.http.get("/orders", headers={"X-Staff-Key": STAFF}).json()
+        self.assertEqual([o["status"] for o in orders], ["confirmed"])
 
-        r = self.http.post(f"/orders/{oid}/approve", headers={"X-Staff-Key": STAFF})
-        self.assertEqual(r.json()["status"], "approved")
-        self.assertIn("ร้านยืนยันออร์เดอร์", self.line.pushed[-1][1][0])
-        self.assertEqual(catalog.stock()["F001"], 18)          # 20 - 2
-        again = self.http.post(f"/orders/{oid}/approve", headers={"X-Staff-Key": STAFF})
-        self.assertEqual(again.status_code, 409)               # no double approve
+    def test_review_endpoints_are_gone(self):
+        headers = {"X-Staff-Key": STAFF}
+        for action in ("approve", "reject"):
+            r = self.http.post(f"/orders/ORD-1/{action}", headers=headers)
+            self.assertEqual(r.status_code, 404)
+
+    def test_orders_from_an_older_version_still_list(self):
+        self.agent.store.orders_dir.mkdir(parents=True)
+        old = self.agent.store.orders_dir / "ORD-OLD.json"
+        old.write_text(json.dumps({"order_id": "ORD-OLD", "status": "pending_staff"}), encoding="utf-8")
+        orders = self.http.get("/orders", headers={"X-Staff-Key": STAFF}).json()
+        self.assertEqual([o["order_id"] for o in orders], ["ORD-OLD"])
 
     def test_duplicate_event_runs_once(self):
         body = line_body(text_event(MSG_ORDER, "same"))

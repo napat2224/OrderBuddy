@@ -93,7 +93,7 @@ class SessionStore:
         return self.orders_dir / f"{_check_id(order_id)}.json"
 
     def submit(self, draft: DraftOrder) -> FinalOrder:
-        """Draft -> FinalOrder (pending_staff). Removes the draft.
+        """Draft -> FinalOrder (confirmed). Removes the draft.
         The caller (state machine / tool) must already have checked that the
         customer confirmed and that draft.missing is empty."""
         order = FinalOrder.from_draft(draft)
@@ -104,21 +104,11 @@ class SessionStore:
         self.delete_draft(draft.line_user_id)
         return order
 
-    def get_order(self, order_id: str) -> Optional[FinalOrder]:
-        data = _read_json(self._order_path(order_id))
-        return FinalOrder.model_validate(data) if data else None
-
-    def review_order(self, order_id: str, approve: bool) -> FinalOrder:
-        """Staff decision. Only a pending order can be reviewed."""
-        order = self.get_order(order_id)
-        if order is None:
-            raise KeyError(f"no order {order_id}")
-        if order.status != "pending_staff":
-            raise ValueError(f"order {order_id} is already {order.status}")
-        order.status = "approved" if approve else "rejected"
-        order.reviewed_at = datetime.now()
-        _write_json(self._order_path(order_id), order.model_dump(mode="json"))
-        return order
+    def list_orders(self) -> list[dict]:
+        """Saved orders as stored, so an order from an older version still shows."""
+        if not self.orders_dir.exists():
+            return []
+        return [_read_json(p) for p in sorted(self.orders_dir.glob("*.json"))]
 
     def new_order_id(self) -> str:
         """ORD-YYYYMMDD-NNNN, counting today's drafts and orders."""

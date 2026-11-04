@@ -7,9 +7,7 @@ Run (from the OrderBuddy folder):
 
 Endpoints
     POST /webhook                 LINE events (signature checked, answered with 200 at once)
-    GET  /orders?status=...       staff: list orders            (header X-Staff-Key)
-    POST /orders/{id}/approve     staff: approve, cut stock, tell the customer
-    POST /orders/{id}/reject      staff: reject, tell the customer
+    GET  /orders                  the shop: list saved orders   (header X-Staff-Key)
     GET  /health
 """
 from __future__ import annotations
@@ -24,7 +22,6 @@ from typing import Optional
 
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Request
 
-from . import catalog
 from .line_adapter import ConsoleLineClient, Incoming, LineClient, parse_events, verify_signature
 from .state_machine import CONFIGS, OrderAgent
 from .trace import setup_file_log
@@ -40,8 +37,6 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s
 
 MSG_UNSUPPORTED = "ตอนนี้รับเฉพาะข้อความและรูปภาพครับ"
 MSG_FAILED = "ขออภัยครับ ระบบขัดข้องชั่วคราว รบกวนส่งข้อความอีกครั้งครับ"
-MSG_APPROVED = "ร้านยืนยันออร์เดอร์ {order_id} แล้วครับ ยอดรวม {total} บาท ขอบคุณครับ"
-MSG_REJECTED = "ขออภัยครับ ร้านไม่สามารถรับออร์เดอร์ {order_id} ได้ รบกวนติดต่อร้านอีกครั้งครับ"
 
 
 @dataclass
@@ -127,46 +122,14 @@ def create_app(settings: Optional[Settings] = None, agent: Optional[OrderAgent] 
                 tasks.add_task(process, ev)
         return {"ok": True}
 
-    # ---------------------------------------------------------------- staff
+    # ----------------------------------------------------------------- shop
     def staff(x_staff_key: str = Header(default="")):
         if not s.staff_key or x_staff_key != s.staff_key:
             raise HTTPException(status_code=401, detail="staff key required")
 
     @app.get("/orders", dependencies=[Depends(staff)])
-    def list_orders(status: Optional[str] = "pending_staff"):
-        store = agent.store
-        if not store.orders_dir.exists():
-            return []
-        orders = [store.get_order(p.stem) for p in sorted(store.orders_dir.glob("*.json"))]
-        return [o.model_dump(mode="json") for o in orders
-                if o and (status is None or o.status == status)]
-
-    def review(order_id: str, approve: bool):
-        try:
-            order = agent.store.review_order(order_id, approve)
-        except KeyError:
-            raise HTTPException(status_code=404, detail="order not found")
-        except ValueError as e:
-            raise HTTPException(status_code=409, detail=str(e))
-        if approve:
-            qty: dict[str, int] = {}
-            for l in order.items:
-                qty[l.sku] = qty.get(l.sku, 0) + l.qty
-            catalog.deduct_stock(qty)
-        msg = MSG_APPROVED if approve else MSG_REJECTED
-        try:
-            line.push(order.line_user_id, [msg.format(order_id=order.order_id, total=order.total)])
-        except Exception:  # noqa: BLE001 - the decision is saved even if LINE is down
-            log.exception("could not notify %s", order.line_user_id)
-        return order.model_dump(mode="json")
-
-    @app.post("/orders/{order_id}/approve", dependencies=[Depends(staff)])
-    def approve(order_id: str):
-        return review(order_id, True)
-
-    @app.post("/orders/{order_id}/reject", dependencies=[Depends(staff)])
-    def reject(order_id: str):
-        return review(order_id, False)
+    def list_orders():
+        return agent.store.list_orders()
 
     @app.get("/health")
     def health():
