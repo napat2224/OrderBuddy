@@ -53,7 +53,8 @@ class RouteResult(_Strict):
 # --------------------------------------------------------- 3. model extraction
 class ExtractedItem(_Strict):
     text: str = Field(min_length=1, description="item name as the customer wrote it")
-    qty: int = Field(ge=1, le=20)
+    # None = no number written (the bot asks), 0 = remove this item (code drops it)
+    qty: Optional[int] = Field(None, ge=0, le=20)
     options: dict[str, str] = Field(default_factory=dict)
     addons: list[str] = Field(default_factory=list)
     note: str = ""

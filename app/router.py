@@ -18,6 +18,10 @@ from .schemas import DraftOrder, RouteResult
 
 _CONFIRM = re.compile(r"^(ยืนยัน|ok|โอเค|ได้เลย|ตกลง|ถูกต้อง|yes|confirm)", re.I)
 _CANCEL = re.compile(r"(ยกเลิก|ไม่เอาแล้ว|cancel)", re.I)
+# confirm submits the order, so the model's label must be backed by a confirm word
+# (a 4B model labelled the answer "2" as confirm)
+_CONFIRM_WORD = re.compile(r"(ยืนยัน|ok|โอเค|ได้เลย|ตกลง|ถูกต้อง|yes|confirm|สั่งเลย|เอาเลย|จัดเลย|ใช่|👍)",
+                           re.I)
 
 
 def classify(h, text: str, draft: DraftOrder, last_bot: str, *, run_id: str,
@@ -30,6 +34,9 @@ def classify(h, text: str, draft: DraftOrder, last_bot: str, *, run_id: str,
                          profiles=(profile,), max_retry=2 if retry else 0, repair=retry,
                          prompt_id=p.id, run_id=run_id)
     if res.ok:
+        if res.value.intent == "confirm" and not _CONFIRM_WORD.search(text):
+            return RouteResult(intent="modify_order" if draft.items else "other",
+                               complexity=res.value.complexity)
         return res.value
     return keyword_route(text, draft)      # safe fallback, logged as safe_failure above
 

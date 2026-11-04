@@ -33,9 +33,13 @@ def _text(msg):
 class FakeClient:
     """extract: {user text: ExtractedOrder dict or list of raw outputs (one per attempt)}"""
 
-    def __init__(self, extract, write_tool_attack=False):
+    def __init__(self, extract, write_tool_attack=False, say="ข้อความจากโมเดลครับ",
+                 resolve_null=(), route_confirm=()):
         self.extract = extract
+        self.route_confirm = route_confirm        # messages the router wrongly labels "confirm"
+        self.resolve_null = resolve_null          # item names the model "fails" to match
         self.write_tool_attack = write_tool_attack
+        self.say = say                            # clarify / answer text
         self.calls = []
 
     def chat(self, model, messages, schema=None, tools=None, **kw):
@@ -45,7 +49,7 @@ class FakeClient:
         user = next(_text(m) for m in reversed(messages) if m["role"] == "user")
 
         if title == "RouteResult":
-            if "ยืนยัน" in user:
+            if "ยืนยัน" in user or user in self.route_confirm:
                 intent = "confirm"
             elif "ยกเลิก" in user:
                 intent = "cancel"
@@ -84,10 +88,11 @@ class FakeClient:
         if title == "ResolveResult":
             listing = next(_text(m) for m in messages if m["role"] == "user")
             items = [l.split(". ", 1)[1].rsplit(" x", 1)[0] for l in listing.splitlines()]
-            return self._out(model, {"items": [{"index": i, "sku": NAME_TO_SKU.get(t)}
-                                               for i, t in enumerate(items)]})
+            return self._out(model, {"items": [
+                {"index": i, "sku": None if t in self.resolve_null else NAME_TO_SKU.get(t)}
+                for i, t in enumerate(items)]})
 
-        return self._out(model, "ข้อความจากโมเดลครับ")   # clarify / answer text
+        return self._out(model, self.say)
 
     @staticmethod
     def _out(model, content):
@@ -148,6 +153,14 @@ class TestHappyPath(Base):
         names = [e["dst"] for e in self.events("state")]
         self.assertEqual(names, ["ROUTE", "EXTRACT", "RESOLVE", "PRICE", "ADDRESS", "CONFIRM"])
 
+    def test_input_and_reply_logged(self):
+        a = self.make({MSG_ORDER: GOOD_ORDER})
+        replies = a.handle(UID, MSG_ORDER)
+        msg, reply = self.events("message")[0], self.events("reply")[0]
+        self.assertEqual(msg["text"], MSG_ORDER)
+        self.assertEqual(reply["run_id"], msg["run_id"])
+        self.assertEqual((reply["state"], reply["replies"]), ("CONFIRM", replies))
+
 
 class TestClarify(Base):
     def test_out_of_stock_then_replace(self):
@@ -161,6 +174,100 @@ class TestClarify(Base):
         r = a.handle(UID, m2)[0]
         self.assertIn("รวม 35 บาท", r)
         self.assertIn("รับเองที่ร้าน", r)
+
+    def test_clarify_reply_that_swaps_item_is_replaced(self):
+        # the model says the wrong drink is out: code sends its own template instead
+        m = "ชาเย็น 1 รับเอง โทร 0899999999"
+        a = self.make({m: order([("ชาเย็น", 1, {})], phone="0899999999", fulfillment="pickup")},
+                      say="ขออภัยครับ ชาไทยหมด แนะนำชาไทยครับ")
+        r = a.handle(UID, m)[0]
+        self.assertIn("'ชาเย็น' หมด", r)
+        self.assertIn("แนะนำ: ชาไทย", r)
+        self.assertEqual(len(self.events("safe_failure")), 1)
+
+    def test_clarify_reply_with_right_item_is_kept(self):
+        m = "ชาเย็น 1 รับเอง โทร 0899999999"
+        good = "ขออภัยครับ ชาเย็นหมดแล้ว รับเป็นชาไทยแทนไหมครับ"
+        a = self.make({m: order([("ชาเย็น", 1, {})], phone="0899999999", fulfillment="pickup")},
+                      say=good)
+        self.assertEqual(a.handle(UID, m)[0], good)
+
+    def test_no_suggestion_of_item_already_in_order(self):
+        m = "ชาเย็น 2 ชาไทย 1 รับเอง โทร 0899999999"
+        a = self.make({m: order([("ชาเย็น", 2, {}), ("ชาไทย", 1, {})],
+                                phone="0899999999", fulfillment="pickup")})
+        r = a.handle(UID, m)[0]                   # fallback: FakeClient text names no item
+        self.assertIn("'ชาเย็น' หมด", r)
+        self.assertNotIn("แนะนำ", r)              # ชาไทย is the only other drink, already ordered
+
+    def test_clarify_reply_suggesting_ordered_item_is_replaced(self):
+        m = "ชาเย็น 2 ชาไทย 1 รับเอง โทร 0899999999"
+        a = self.make({m: order([("ชาเย็น", 2, {}), ("ชาไทย", 1, {})],
+                                phone="0899999999", fulfillment="pickup")},
+                      say="ขออภัยครับ ชาเย็นหมดแล้ว รับเป็นชาไทยแทนไหมครับ")
+        r = a.handle(UID, m)[0]
+        self.assertNotIn("ชาไทย", r)
+        self.assertIn("'ชาเย็น' หมด", r)
+
+    def test_out_of_stock_item_is_not_called_unknown(self):
+        # the model answers null for ชาเย็น after seeing it is out of stock
+        m = "ชาเย็น 1 รับเอง โทร 0899999999"
+        a = self.make({m: order([("ชาเย็น", 1, {})], phone="0899999999", fulfillment="pickup")},
+                      resolve_null=("ชาเย็น",))
+        r = a.handle(UID, m)[0]
+        self.assertEqual(self.store.get_draft(UID).missing, ["stock:F005"])
+        self.assertIn("'ชาเย็น' หมด", r)
+        self.assertNotIn("ไม่พบเมนู", r)
+
+    def test_qty_zero_removes_item(self):
+        m1, m2 = "ชาไทย 1 รับเอง โทร 0899999999", "แก้ไข เอา0อัน"
+        a = self.make({m1: order([("ชาไทย", 1, {})], phone="0899999999", fulfillment="pickup"),
+                       m2: order([("ชาไทย", 0, {})], phone="0899999999", fulfillment="pickup")})
+        a.handle(UID, m1)
+        self.assertEqual(self.store.get_draft(UID).state, "CONFIRM")
+        r = a.handle(UID, m2)[0]
+        d = self.store.get_draft(UID)
+        self.assertEqual((d.items, d.missing), ([], ["items"]))
+        self.assertEqual(r, "ต้องการสั่งเมนูอะไรครับ")
+
+    def test_no_number_asks_qty_before_price(self):
+        m1, m2 = "ชาไทย รับเอง โทร 0899999999", "2"
+        a = self.make({m1: order([("ชาไทย", None, {})], phone="0899999999", fulfillment="pickup"),
+                       m2: order([("ชาไทย", 2, {})], phone="0899999999", fulfillment="pickup")})
+        r = a.handle(UID, m1)[0]
+        d = self.store.get_draft(UID)
+        self.assertEqual((d.state, d.missing), ("CLARIFY", ["qty:F006"]))
+        self.assertNotIn("รวม", r)                    # not priced with a guessed qty
+        self.assertIn("ยังไม่ทราบจำนวน 'ชาไทย'", r)
+        r = a.handle(UID, m2)[0]
+        self.assertIn("ชาไทย x2 = 70 บาท", r)
+        self.assertEqual(self.store.get_draft(UID).state, "CONFIRM")
+
+    def test_model_guessed_qty_is_not_trusted(self):
+        # the model writes qty 1 although no number was written: code asks instead
+        m = "ชาไทย รับเอง โทร 0899999999"
+        a = self.make({m: order([("ชาไทย", 1, {})], phone="0899999999", fulfillment="pickup")})
+        a.handle(UID, m)
+        self.assertEqual(self.store.get_draft(UID).missing, ["qty:F006"])
+
+    def test_written_qty_is_kept(self):
+        m = "เอา 2 ชาไทย กับ ข้าวผัดกุ้ง1 รับเอง โทร 0899999999"
+        a = self.make({m: order([("ชาไทย", 2, {}), ("ข้าวผัดกุ้ง", 1, {})],
+                                phone="0899999999", fulfillment="pickup")})
+        a.handle(UID, m)
+        d = self.store.get_draft(UID)
+        self.assertEqual((d.state, [l.qty for l in d.items]), ("CONFIRM", [2, 1]))
+
+    def test_number_answer_is_not_confirm(self):
+        # on the summary screen "2" must not submit the order, whatever the router says
+        m1 = "ชาไทย 1 รับเอง โทร 0899999999"
+        a = self.make({m1: order([("ชาไทย", 1, {})], phone="0899999999", fulfillment="pickup"),
+                       "2": order([("ชาไทย", 2, {})], phone="0899999999", fulfillment="pickup")},
+                      route_confirm=("2",))
+        a.handle(UID, m1)
+        r = a.handle(UID, "2")[0]
+        self.assertFalse(list(self.store.orders_dir.glob("*.json")))
+        self.assertIn("ชาไทย x2", r)
 
     def test_missing_phone(self):
         m = "ข้าวผัดกุ้ง 1 ส่ง 99/1 ถ.สุขุมวิท 10110"

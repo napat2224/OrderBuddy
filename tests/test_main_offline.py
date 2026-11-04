@@ -25,6 +25,7 @@ from test_agent_offline import GOOD_ORDER, MSG_ORDER, UID, Base  # noqa: E402
 
 from app import catalog  # noqa: E402
 from app.main import Settings, create_app  # noqa: E402
+from harness import load_config  # noqa: E402
 
 SECRET, STAFF = "test-secret", "staff-key"
 
@@ -115,7 +116,7 @@ class TestWebhook(Base):
               "message": {"type": "image", "id": "img1"}}
         self.post(line_body(ev))
         models = [m for m, title, _ in self.client.calls if title == "ExtractedOrder"]
-        self.assertEqual(models, ["gemma3:4b-it-q4_K_M"])
+        self.assertEqual(models, [load_config().profile("vision").model])
         self.assertIn("รวม 170 บาท", self.line.pushed[-1][1][0])
 
     def test_sticker_gets_polite_answer(self):
