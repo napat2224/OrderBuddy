@@ -142,9 +142,10 @@ class TestHappyPath(Base):
         a = self.make({MSG_ORDER: GOOD_ORDER})
         a.handle(UID, MSG_ORDER)
         used = {(t or ("tools" if tools else "text")): m for m, t, tools in self.client.calls}
-        self.assertEqual(used["RouteResult"], "qwen3:4b-q4_K_M")
-        self.assertEqual(used["ExtractedOrder"], "qwen3:4b-q4_K_M")
-        self.assertEqual(used["tools"], "qwen3:4b-q4_K_M")
+        model = a.h.config.profile          # read config.yaml so swapping models keeps tests green
+        self.assertEqual(used["RouteResult"], model("router").model)
+        self.assertEqual(used["ExtractedOrder"], model("fast").model)
+        self.assertEqual(used["tools"], model("fast").model)
         names = [e["dst"] for e in self.events("state")]
         self.assertEqual(names, ["ROUTE", "EXTRACT", "RESOLVE", "PRICE", "ADDRESS", "CONFIRM"])
 

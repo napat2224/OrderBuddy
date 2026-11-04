@@ -8,9 +8,9 @@ runtime:
   timeout_s: 300
 
 profiles:
-  # OrderBuddy: router + vision added; fast/reasoning unchanged.
+  # OrderBuddy: small models so it runs on a MacBook Air (~5.8 GB total).
   router:
-    model: qwen3:4b-q4_K_M
+    model: qwen3:1.7b
     temperature: 0
     num_ctx: 4096
     num_predict: 128
@@ -18,7 +18,7 @@ profiles:
     think: false
 
   fast:
-    model: qwen3:4b-q4_K_M
+    model: qwen3:1.7b
     temperature: 0
     num_ctx: 8192
     num_predict: 512
@@ -26,20 +26,20 @@ profiles:
     think: false         # qwen3 reasoning off: faster, cleaner JSON
 
   reasoning:
-    model: qwen3:8b-q4_K_M
+    model: qwen3:4b-q4_K_M
     temperature: 0
-    num_ctx: 16384
+    num_ctx: 8192
     num_predict: 1024
     keep_alive: 10m
     think: false
 
   vision:
-    model: gemma3:4b-it-q4_K_M
+    model: qwen3-vl:2b-instruct
     temperature: 0
     num_ctx: 8192
     num_predict: 768
     keep_alive: 10m
-    # no "think" key: gemma3 has no reasoning mode
+    # no "think" key: the instruct model has no reasoning mode
 
   # Not used by OrderBuddy (too slow on 8 GB); kept so the course scripts still run.
   fallback:

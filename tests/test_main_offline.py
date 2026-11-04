@@ -115,7 +115,7 @@ class TestWebhook(Base):
               "message": {"type": "image", "id": "img1"}}
         self.post(line_body(ev))
         models = [m for m, title, _ in self.client.calls if title == "ExtractedOrder"]
-        self.assertEqual(models, ["gemma3:4b-it-q4_K_M"])
+        self.assertEqual(models, [self.http.app.state.agent.h.config.profile("vision").model])
         self.assertIn("รวม 170 บาท", self.line.pushed[-1][1][0])
 
     def test_sticker_gets_polite_answer(self):
