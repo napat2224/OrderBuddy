@@ -40,13 +40,18 @@ def _norm(s: str) -> str:
     return re.sub(r"\s+", "", s.lower())
 
 
-def _score(query: str, candidate: str) -> float:
+def _score(query: str, candidate: str, is_name: bool = True) -> float:
     q, c = _norm(query), _norm(candidate)
     if q == c:
         return 1.0
-    if q in c or c in q:
+    if q in c:
         return 0.85
-    return SequenceMatcher(None, q, c).ratio()
+    ratio = SequenceMatcher(None, q, c).ratio()
+    if c in q:
+        # "ข้าวผัดกุ้งสด" holds a full menu name, but "ข้าวผัดหมู" only holds the short alias
+        # "ข้าวผัด" and is another dish: keep it as a suggestion, never a sure match
+        return 0.85 if is_name else min(ratio, 0.7)
+    return ratio
 
 
 @tool(permission="read")
@@ -55,7 +60,8 @@ def product_search(args: SearchArgs) -> list[dict]:
     score (0-1). An empty list means nothing on the menu matches."""
     hits = []
     for it in cat.catalog().values():
-        s = max(_score(args.query, n) for n in [it.name, *it.aliases])
+        s = max(_score(args.query, it.name),
+                *(_score(args.query, a, is_name=False) for a in it.aliases), 0.0)
         if s >= 0.6:
             hits.append({"sku": it.sku, "name": it.name, "price": it.price, "score": round(s, 2)})
     return sorted(hits, key=lambda h: -h["score"])[: args.top_k]
@@ -113,27 +119,23 @@ class AddressArgs(BaseModel):
     need_address: bool = True
 
 
-_POSTCODE = re.compile(r"\b(\d{5})\b")
+_POSTCODE = re.compile(r"(?<!\d)(\d{5})(?!\d)")   # no \b: Thai letters count as word characters
 
 
 @tool(permission="read")
 def address_validator(args: AddressArgs) -> dict:
     """Check a Thai phone number and delivery address. Returns valid, normalized
-    address/phone, missing fields and whether the postcode is in the delivery zone."""
+    address/phone and missing fields. The shop delivers everywhere."""
     missing, phone = [], re.sub(r"[\s\-]", "", args.phone)
     if not re.fullmatch(r"0\d{9}", phone):
         missing.append("phone")
-    in_zone = True
     if args.need_address:
         addr = " ".join(args.address.split())
-        m = _POSTCODE.search(addr)
         if not addr or not re.search(r"\d", addr):
             missing.append("address")
-        elif not m:
+        elif not _POSTCODE.search(addr):
             missing.append("postcode")
-        else:
-            in_zone = m.group(1) in cat.shop()["delivery_zones"]
-    return {"valid": not missing and in_zone, "missing": missing, "in_zone": in_zone,
+    return {"valid": not missing, "missing": missing,
             "normalized": {"address": " ".join(args.address.split()), "phone": phone}}
 
 

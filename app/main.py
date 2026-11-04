@@ -18,6 +18,7 @@ import logging
 import os
 import threading
 from collections import OrderedDict
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Optional
 
@@ -26,6 +27,7 @@ from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Re
 from . import catalog
 from .line_adapter import ConsoleLineClient, Incoming, LineClient, parse_events, verify_signature
 from .state_machine import CONFIGS, OrderAgent
+from .trace import setup_file_log
 
 try:                                  # .env is optional; real env vars also work
     from dotenv import load_dotenv
@@ -83,7 +85,15 @@ def create_app(settings: Optional[Settings] = None, agent: Optional[OrderAgent] 
     if line is None:
         line = LineClient(s.access_token) if s.access_token else ConsoleLineClient()
     seen = SeenEvents()
-    app = FastAPI(title="OrderBuddy")
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        # at server start, not import, so offline tests never write to the real log
+        setup_file_log(agent.h.log.path.parent, "uvicorn.access", "uvicorn.error")
+        log.info("server started: config=%s line=%s", agent.cfg.name, type(line).__name__)
+        yield
+
+    app = FastAPI(title="OrderBuddy", lifespan=lifespan)
     app.state.agent, app.state.line = agent, line
 
     # ------------------------------------------------------------- customer
@@ -109,8 +119,10 @@ def create_app(settings: Optional[Settings] = None, agent: Optional[OrderAgent] 
                       x_line_signature: str = Header(default="")):
         body = await request.body()
         if not verify_signature(body, x_line_signature, s.channel_secret):
+            log.warning("webhook: bad signature, check LINE_CHANNEL_SECRET in .env")
             raise HTTPException(status_code=403, detail="bad signature")
         for ev in parse_events(body):            # LINE "Verify" sends no events: just 200
+            log.info("webhook: %s event from %s", ev.kind, ev.user_id)
             if seen.first_time(ev.event_id):
                 tasks.add_task(process, ev)
         return {"ok": True}

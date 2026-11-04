@@ -10,15 +10,15 @@ runtime:
 profiles:
   # OrderBuddy: small models so it runs on a MacBook Air (~5.8 GB total).
   router:
-    model: qwen3:1.7b
+    model: qwen3:4b-q4_K_M   # same model and num_ctx as fast: swapping cost about 18 s per message
     temperature: 0
-    num_ctx: 4096
+    num_ctx: 8192
     num_predict: 128
     keep_alive: 30m
     think: false
 
   fast:
-    model: qwen3:1.7b
+    model: qwen3:4b-q4_K_M   # 1.7b swapped dishes and invented items in EXTRACT
     temperature: 0
     num_ctx: 8192
     num_predict: 512

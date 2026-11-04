@@ -16,7 +16,7 @@ import app  # noqa: E402,F401  (puts Harness/ on sys.path)
 from harness import ChatResult, DomainError, Harness, LLMConnectionError  # noqa: E402
 
 from app import router  # noqa: E402
-from app.checks import clean_reply, extract_check  # noqa: E402
+from app.checks import clean_extracted, clean_reply, extract_check  # noqa: E402
 from app.schemas import Customer, DraftOrder, ExtractedOrder, OrderLine, RouteResult  # noqa: E402
 
 UID = "U" + "0" * 32
@@ -149,6 +149,113 @@ class TestExtractCheck(unittest.TestCase):
             extract_check("x", EMPTY, [], False)(ext(n=16))
 
 
+class TestNamedItemMustBeInOrder(unittest.TestCase):
+    def check(self, text, *items):
+        extract_check(text, EMPTY, [], False)(
+            ExtractedOrder(items=[{"text": t, "qty": 1} for t in items]))
+
+    def test_new_item_ignored_by_the_model_is_rejected(self):
+        with self.assertRaises(DomainError):
+            self.check("เอาชาเย็น 1", "ข้าวผัดกุ้ง")
+
+    def test_named_item_in_the_order_passes(self):
+        self.check("เอาชาเย็น 1", "ข้าวผัดกุ้ง", "ชาเย็น")
+        self.check("ข้าวผัดกุ้งสด 1", "ข้าวผัดกุ้งสด")
+
+    def test_removing_or_replacing_a_dish_is_allowed(self):
+        self.check("ไม่เอาชาเย็น", "ข้าวผัดกุ้ง")
+        self.check("เอาชาไทยแทนข้าวผัดกุ้ง", "ชาไทย")
+
+    def test_photos_are_skipped(self):
+        extract_check("ชาเย็น", EMPTY, [], True)(ExtractedOrder(items=[]))
+
+
+class TestPostcode(unittest.TestCase):
+    def address(self, text, model_address, draft_address=None):
+        draft = DraftOrder(order_id="O", line_user_id="U",
+                           customer={"address": draft_address})
+        order = ExtractedOrder(customer=Customer(address=model_address))
+        return clean_extracted(order, text, draft, [], False)[0].customer.address
+
+    def test_postcode_sent_alone_joins_the_address(self):
+        self.assertEqual(self.address("รหัสไปรษณีย์ 10110", "12/3 ซอยประชา"),
+                         "12/3 ซอยประชา 10110")
+        self.assertEqual(self.address("รหัสไปรษณีย์10110", None, "12/3 ซอยประชา"),
+                         "12/3 ซอยประชา 10110")
+
+    def test_new_postcode_replaces_the_old_one(self):
+        self.assertEqual(self.address("แก้เป็น 10260", "12/3 ซอยประชา 10110"),
+                         "12/3 ซอยประชา 10260")
+
+    def test_phone_is_not_a_postcode(self):
+        self.assertEqual(self.address("โทร 0812345678", "12/3 ซอยประชา"), "12/3 ซอยประชา")
+
+    def test_no_address_yet_stays_empty(self):
+        self.assertIsNone(self.address("รหัส 10110", None))
+
+
+class TestCleanExtracted(unittest.TestCase):
+    MENU_COPY = {"text": "กะเพราหมูกรอบ", "qty": 2,
+                 "options": {"spice": "ไม่เผ็ด/เผ็ดน้อย/เผ็ดกลาง/เผ็ดมาก"},
+                 "addons": ["ไข่ดาว +10", "ไข่เจียว +15"]}
+
+    def clean(self, item, text, draft=EMPTY, history=(), has_image=False):
+        order = ExtractedOrder(items=[item])
+        out, dropped = clean_extracted(order, text, draft, list(history), has_image)
+        return out.items[0], dropped
+
+    def test_menu_copy_with_no_request_is_removed(self):
+        item, dropped = self.clean(self.MENU_COPY, "ขอกะเพราหมูกรอบ 2 จาน")
+        self.assertEqual((item.options, item.addons), ({}, []))
+        self.assertEqual(len(dropped), 3)
+
+    def test_requested_value_is_picked_out_of_a_menu_copy(self):
+        item, _ = self.clean(self.MENU_COPY, "กะเพราหมูกรอบ 2 เผ็ด น้อย ใส่ไข่ดาว")
+        self.assertEqual(item.options, {"spice": "เผ็ดน้อย"})
+        self.assertEqual(item.addons, ["ไข่ดาว"])
+
+    def test_earlier_choices_are_kept(self):
+        item = {"text": "ชาเย็น", "qty": 1, "options": {"sweet": "หวานน้อย"}, "addons": []}
+        from_history = [{"role": "user", "content": "ชาเย็น หวานน้อย"}]
+        self.assertEqual(self.clean(item, "รับเอง", history=from_history)[0].options,
+                         {"sweet": "หวานน้อย"})
+        draft = DraftOrder(order_id="O", line_user_id="U", items=[OrderLine(
+            sku="F005", name="ชาเย็น", qty=1, options={"sweet": "หวานน้อย"})])
+        self.assertEqual(self.clean(item, "รับเอง", draft=draft)[0].options,
+                         {"sweet": "หวานน้อย"})
+
+    def test_bot_messages_do_not_count_as_asking(self):
+        history = [{"role": "assistant", "content": "เพิ่มไข่ดาวไหมครับ"}]
+        item = {"text": "ข้าวผัดกุ้ง", "qty": 1, "addons": ["ไข่ดาว"]}
+        self.assertEqual(self.clean(item, "ข้าวผัดกุ้ง 1", history=history)[0].addons, [])
+
+    def test_refused_item_is_removed(self):
+        order = ExtractedOrder(items=[{"text": "ข้าวผัดกุ้ง", "qty": 1}, {"text": "ชาไทย", "qty": 2}])
+        out, dropped = clean_extracted(order, "ไม่เอาชาไทย", EMPTY, [], False)
+        self.assertEqual([i.text for i in out.items], ["ข้าวผัดกุ้ง"])
+        self.assertEqual(dropped, ["ชาไทย refused"])
+
+    def test_refused_addon_is_removed(self):
+        item = {"text": "ข้าวผัดกุ้ง", "qty": 1, "addons": ["ไข่ดาว"]}
+        self.assertEqual(self.clean(item, "ข้าวผัดกุ้ง 1 ไม่ใส่ไข่ดาว")[0].addons, [])
+
+    def test_fulfillment_must_be_said(self):
+        def result(text, value, address=None):
+            order = ExtractedOrder(items=[], fulfillment=value, customer=Customer(address=address))
+            return clean_extracted(order, text, EMPTY, [], False)[0].fulfillment
+        self.assertIsNone(result("เพิ่มชาไทย 1", "delivery"))
+        self.assertIsNone(result("เพิ่มชาไทย 1", "pickup"))
+        self.assertEqual(result("ส่งด้วยครับ", "delivery"), "delivery")
+        self.assertEqual(result("เดี๋ยวมารับ", "pickup"), "pickup")
+        self.assertEqual(result("99/1 ถ.สุขุมวิท 10110", "delivery", "99/1 ถ.สุขุมวิท 10110"),
+                         "delivery")
+
+    def test_photos_are_not_changed(self):
+        item, dropped = self.clean(self.MENU_COPY, "", has_image=True)
+        self.assertEqual(item.addons, self.MENU_COPY["addons"])
+        self.assertEqual(dropped, [])
+
+
 class TestCleanReply(unittest.TestCase):
     SYSTEM = "- ชาไทย 35 บาท"
     FALLBACK = "template ครับ"
@@ -192,8 +299,9 @@ class TestPrompts(unittest.TestCase):
     def test_latest_versions(self):
         prompts = Harness(client=ScriptedClient(),
                           log_file=Path(tempfile.mkdtemp()) / "c.jsonl").prompts
-        for name in ("route", "extract", "extract_image", "clarify"):
+        for name in ("route", "extract_image", "clarify"):
             self.assertEqual(prompts.get(name).version, 2, name)
+        self.assertEqual(prompts.get("extract").version, 3)
 
 
 if __name__ == "__main__":

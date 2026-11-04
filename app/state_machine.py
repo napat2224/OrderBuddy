@@ -17,17 +17,19 @@ Safety (M19):
 from __future__ import annotations
 
 import json
+import traceback
 from dataclasses import dataclass
 from typing import Optional
 
 from harness import Harness, LLMError, ask_structured, build_messages, new_run_id
 
 from . import router, tools
-from .agent import call_tool, resolve_with_code, resolve_with_model
+from .agent import call_tool, resolve_items
 from .catalog import catalog, menu_text, stock
-from .checks import clean_reply, extract_check
+from .checks import clean_extracted, clean_reply, extract_check
 from .schemas import DraftOrder, ExtractedItem, ExtractedOrder, OrderLine, RouteResult
 from .session import SessionStore
+from .trace import TracedHarness
 
 READ = frozenset({"read"})
 READ_WRITE = frozenset({"read", "write"})
@@ -48,7 +50,6 @@ PROBLEM_TEXT = {
     "phone": "ยังไม่มีเบอร์โทรที่ถูกต้อง (10 หลัก)",
     "address": "ยังไม่มีที่อยู่จัดส่ง (บ้านเลขที่)",
     "postcode": "ที่อยู่ยังไม่มีรหัสไปรษณีย์",
-    "zone": "ที่อยู่อยู่นอกพื้นที่จัดส่ง",
 }
 
 
@@ -59,7 +60,7 @@ class AgentConfig:
     name: str = "C3"
     use_router: bool = True          # False: every step uses the reasoning profile
     validate_retry: bool = True      # False: one attempt, no repair, no escalation
-    resolve_with_model: bool = True  # False: code matching only
+    resolve_with_model: bool = True  # False: unclear names go straight to CLARIFY
     max_tool_rounds: int = 4
 
 
@@ -72,7 +73,7 @@ CONFIGS = {
 class OrderAgent:
     def __init__(self, h: Optional[Harness] = None, store: Optional[SessionStore] = None,
                  config: Optional[AgentConfig] = None):
-        self.h = h or Harness()
+        self.h = h or TracedHarness()
         self.store = store or SessionStore()
         self.cfg = config or AgentConfig()
         tools.configure(self.store)
@@ -91,9 +92,12 @@ class OrderAgent:
                 replies, closed = self._step(run_id, draft, history, text, image_b64)
             except Exception as e:  # noqa: BLE001 - ERROR state: tell the user, keep the old draft
                 self.h.log.write("agent_error", run_id=run_id, user=line_user_id,
-                                 state=draft.state, error=f"{type(e).__name__}: {e}")
+                                 state=draft.state, error=f"{type(e).__name__}: {e}",
+                                 trace=traceback.format_exc())
                 self._log_state(run_id, draft.state, "ERROR")
                 return [MSG["error"]]
+
+            self.h.log.write("reply", run_id=run_id, state=draft.state, replies=replies)
 
             if closed:                       # submitted or cancelled
                 self.store.clear_history(line_user_id)
@@ -166,14 +170,11 @@ class OrderAgent:
             self._goto(run_id, draft, "CLARIFY")
             return [MSG["ask_items"]]
 
-        # ---- RESOLVE: model picks skus with tools, code re-checks everything
+        # ---- RESOLVE: code matches names; the model only picks between equal matches
         self._goto(run_id, draft, "RESOLVE")
-        mapping = None
-        if self.cfg.resolve_with_model:
-            mapping = resolve_with_model(self.h, ext.items, run_id=run_id,
-                                         max_rounds=self.cfg.max_tool_rounds)
-        if mapping is None:
-            mapping = resolve_with_code(self.h, ext.items, run_id=run_id)
+        mapping = resolve_items(self.h, ext.items, run_id=run_id,
+                                use_model=self.cfg.resolve_with_model,
+                                max_rounds=self.cfg.max_tool_rounds)
         lines, missing, problems, suggestions = self._build_lines(run_id, ext.items, mapping)
         draft.items = lines
 
@@ -200,8 +201,6 @@ class OrderAgent:
                     raise RuntimeError(f"address_validator failed: {r['error']}")
                 res = r["result"]
                 missing += res["missing"]
-                if need_addr and not res["in_zone"]:
-                    missing.append("zone")
                 if res["normalized"]["phone"] and "phone" not in res["missing"]:
                     draft.customer.phone = res["normalized"]["phone"]
                 draft.customer.address_valid = need_addr and res["valid"]
@@ -210,7 +209,7 @@ class OrderAgent:
         draft.missing = missing
         if missing:
             self._goto(run_id, draft, "CLARIFY")
-            return [self._clarify(run_id, draft, problems, suggestions)]
+            return [self._clarify(problems, suggestions)]
         self._goto(run_id, draft, "CONFIRM")
         return [self._summary(draft)]
 
@@ -240,7 +239,13 @@ class OrderAgent:
                              max_retry=2 if retry else 0, repair=retry,
                              domain_check=extract_check(text, draft, history[-6:], bool(image_b64)),
                              prompt_id=p.id, run_id=run_id)
-        return res.value if res.ok else None
+        if not res.ok:                        # the harness already logged safe_failure
+            return None
+        order, dropped = clean_extracted(res.value, text, draft, history[-6:], bool(image_b64))
+        self.h.log.write("extract", run_id=run_id, prompt=p.id, profile=res.profile_used,
+                         attempts=res.attempts, errors=res.errors, dropped=dropped,
+                         result=order.model_dump())
+        return order
 
     @staticmethod
     def _merge_customer(draft: DraftOrder, ext: ExtractedOrder) -> None:
@@ -299,14 +304,15 @@ class OrderAgent:
         draft.total = price["total"]
 
     # ------------------------------------------------------- CLARIFY / answer
-    def _clarify(self, run_id, draft, problems, suggestions) -> str:
-        fallback = "ขอข้อมูลเพิ่มนิดนึงครับ: " + "; ".join(problems)
+    @staticmethod
+    def _clarify(problems, suggestions) -> str:
+        """Written by code: the customer must see exactly what is wrong. With a model, a postcode
+        the customer had sent was reported as missing and invented order statuses appeared."""
+        rows = ["ออร์เดอร์ยังไม่ครบครับ", *(f"- {p}" for p in problems)]
         if suggestions:
-            fallback += " (แนะนำ: " + ", ".join(suggestions) + ")"
-        p = self.h.prompts.get("clarify")
-        system = p.render(order=", ".join(f"{l.name} x{l.qty}" for l in draft.items) or "none",
-                          problems="; ".join(problems), suggestions=", ".join(suggestions) or "none")
-        return self._say(run_id, "reasoning", p.id, system, "เขียนข้อความถึงลูกค้า", fallback)
+            rows.append("เมนูที่แนะนำ: " + ", ".join(suggestions))
+        rows.append("รบกวนแจ้งกลับด้วยนะครับ")
+        return "\n".join(rows)
 
     def _answer(self, run_id, text) -> str:
         p = self.h.prompts.get("answer")

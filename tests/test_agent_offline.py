@@ -10,20 +10,25 @@ import json
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 import app  # noqa: E402,F401  (puts Harness/ on sys.path)
-from harness import ChatResult, Harness  # noqa: E402
+from harness import ChatResult, Harness, LLMConnectionError  # noqa: E402
 
 from app.session import SessionStore  # noqa: E402
+from app.debug import format_event, last_run_ids  # noqa: E402
 from app.state_machine import CONFIGS, OrderAgent  # noqa: E402
+from app.trace import TracedHarness  # noqa: E402
 
 UID = "U" + "0" * 32
 NAME_TO_SKU = {"กะเพราหมูกรอบ": "F001", "ข้าวผัดกุ้ง": "F002", "ต้มยำกุ้ง": "F003",
-               "ข้าวสวย": "F004", "ชาเย็น": "F005", "ชาไทย": "F006"}
+               "ข้าวสวย": "F004", "ชาเย็น": "F005", "ชาไทย": "F006",
+               "ชา": "F006",      # unclear name: the model picks one of the two teas
+               "กุ้ง": "F004"}    # unclear name: the model answers with an item that does not fit
 
 
 def _text(msg):
@@ -145,9 +150,140 @@ class TestHappyPath(Base):
         model = a.h.config.profile          # read config.yaml so swapping models keeps tests green
         self.assertEqual(used["RouteResult"], model("router").model)
         self.assertEqual(used["ExtractedOrder"], model("fast").model)
-        self.assertEqual(used["tools"], model("fast").model)
+        self.assertNotIn("tools", used)     # a clear name needs no tool-calling loop
         names = [e["dst"] for e in self.events("state")]
         self.assertEqual(names, ["ROUTE", "EXTRACT", "RESOLVE", "PRICE", "ADDRESS", "CONFIRM"])
+
+
+class TestDebugLog(Base):
+    """The log must be enough to see why a customer got a given answer."""
+
+    def traced(self, client):
+        self.log = Path(tempfile.mkdtemp()) / "calls.jsonl"
+        h = TracedHarness(client=client, log_file=self.log)
+        return OrderAgent(h, SessionStore(self.log.parent), CONFIGS["C3"])
+
+    def test_raw_reply_result_and_customer_reply_are_logged(self):
+        menu_copy = order([("กะเพราหมูกรอบ", 2, {"addons": ["ไข่เจียว +15"]})])
+        m = "ขอกะเพราหมูกรอบ 2"
+        replies = self.traced(FakeClient({m: menu_copy})).handle(UID, m)
+        raw = [e for e in self.events("llm_trace") if "ไข่เจียว" in (e.get("reply") or "")]
+        self.assertEqual(len(raw), 1)                     # the model's words, before checks
+        extract = self.events("extract")[0]
+        self.assertEqual(extract["result"]["items"][0]["addons"], [])
+        self.assertEqual(extract["dropped"], ["กะเพราหมูกรอบ addon ไข่เจียว +15"])
+        self.assertEqual(self.events("reply")[0]["replies"], replies)
+
+    def test_model_failure_is_logged_with_traceback(self):
+        class Down(FakeClient):
+            def chat(self, model, messages, schema=None, tools=None, **kw):
+                if (schema or {}).get("title") == "ExtractedOrder":
+                    raise LLMConnectionError("Is Ollama running?")
+                return super().chat(model, messages, schema=schema, tools=tools, **kw)
+
+        a = self.traced(Down({}))
+        with self.assertLogs("orderbuddy", level="ERROR"):
+            a.handle(UID, "ขอกะเพราหมูกรอบ 2")
+        self.assertIn("Is Ollama running?", self.events("llm_trace")[-1]["error"])
+        error = self.events("agent_error")[0]
+        self.assertIn("LLMConnectionError", error["trace"])
+        self.assertIn("LLMConnectionError", format_event(error))
+
+    def test_every_step_reaches_the_readable_log(self):
+        m = "ขอกะเพราหมูกรอบ 2"
+        a = self.traced(FakeClient({m: order([("กะเพราหมูกรอบ", 2, {})])}))
+        with self.assertLogs("orderbuddy", level="INFO") as seen:
+            a.handle(UID, m)
+        text = "\n".join(seen.output)
+        for event in ("message", "route", "state", "llm_trace", "extract", "tool_call", "reply"):
+            self.assertIn(f"] {event} ", text)
+        self.assertNotIn("] llm_call ", text)             # valid ones only repeat llm_trace
+
+    def test_last_run_ids_only_counts_customer_messages(self):
+        events = [{"event": "message", "run_id": "a"}, {"event": "llm_call", "run_id": "x"},
+                  {"event": "message", "run_id": "b"}]
+        self.assertEqual(last_run_ids(events, 1), ["b"])
+        self.assertEqual(last_run_ids(events, 5), ["a", "b"])
+
+
+class TestResolve(Base):
+    def lines(self, text, qty=1, **kw):
+        m = f"ขอ{text} {qty} รับเอง โทร 0812345678"
+        a = self.make({m: order([(text, qty, {})], phone="0812345678", fulfillment="pickup")}, **kw)
+        replies = a.handle(UID, m)
+        return self.store.get_draft(UID), replies
+
+    def model_called(self):
+        return any(tools for _, _, tools in self.client.calls)
+
+    def test_clear_names_need_no_model(self):
+        for text, sku in [("ข้าวผัดกุ้ง", "F002"), ("กระเพราหมูกรอบ", "F001"),      # exact, alias
+                          ("กะเพรา", "F001"), ("ชาเยน", "F005"), ("ข้าวผัดกุ้งสด", "F002")]:
+            with self.subTest(text):
+                d, _ = self.lines(text, qty=1)
+                self.assertEqual([l.sku for l in d.items], [sku])
+                self.assertFalse(self.model_called())
+
+    def test_other_dishes_are_not_swapped(self):
+        for text in ["ผัดไทยกุ้งสด", "ข้าวผัดหมู", "ข้าวผัดปู", "ต้มยำไก่", "ต้มข่ากุ้ง", "กะเพราไก่",
+                     "พิซซ่า"]:
+            with self.subTest(text):
+                d, _ = self.lines(text)
+                self.assertEqual(d.items, [])
+                self.assertEqual(d.missing, [f"item:{text}"])
+                self.assertFalse(self.model_called())
+
+    def test_sold_out_is_not_called_unknown(self):
+        d, _ = self.lines("ชาเย็น", qty=2)            # stock of F005 is 0
+        self.assertEqual(d.missing, ["stock:F005"])
+        self.assertEqual([l.sku for l in d.items], ["F005"])
+
+    def test_unclear_name_goes_to_the_model(self):
+        d, _ = self.lines("ชา")
+        self.assertTrue(self.model_called())
+        self.assertEqual([l.sku for l in d.items], ["F006"])
+        self.assertEqual(self.events("resolve")[0]["unclear"], ["ชา"])
+
+    def test_model_answer_outside_the_matches_is_rejected(self):
+        d, _ = self.lines("กุ้ง")                      # fits F002 and F003, model says F004
+        self.assertEqual(d.items, [])
+        self.assertEqual(d.missing, ["item:กุ้ง"])
+        self.assertEqual(self.events("resolve")[0]["rejected"], ["กุ้ง: F004"])
+
+    def test_unclear_name_without_the_model_asks_the_customer(self):
+        m = "ชา 1"
+        a = self.make({m: order([("ชา", 1, {})])})
+        a.cfg = replace(a.cfg, resolve_with_model=False)   # CONFIGS is shared between tests
+        a.handle(UID, m)
+        self.assertEqual(self.store.get_draft(UID).missing, ["item:ชา"])
+        self.assertFalse(self.model_called())
+
+
+class TestClarifyMessage(Base):
+    def test_each_problem_is_stated_without_a_model(self):
+        m = "ข้าวผัดกุ้ง 1 ส่ง 12/3 ซอยประชา 12312 โทร 099999999"
+        a = self.make({m: order([("ข้าวผัดกุ้ง", 1, {})], phone="099999999",
+                                address="12/3 ซอยประชา 12312", fulfillment="delivery")})
+        reply = a.handle(UID, m)[0]
+        self.assertIn("เบอร์โทร", reply)
+        self.assertNotIn("รหัสไปรษณีย์", reply)         # the customer did send one
+        self.assertTrue(reply.endswith("ครับ"))
+        self.assertFalse([c for c in self.client.calls if c[1] is None and not c[2]])
+
+    def test_any_postcode_can_get_delivery(self):
+        m = "ข้าวผัดกุ้ง 1 ส่ง 12/3 ซอยประชา 99999 โทร 0812345678"
+        a = self.make({m: order([("ข้าวผัดกุ้ง", 1, {})], phone="0812345678",
+                                address="12/3 ซอยประชา 99999", fulfillment="delivery")})
+        self.assertIn("รวม 100 บาท", a.handle(UID, m)[0])
+        d = self.store.get_draft(UID)
+        self.assertEqual((d.state, d.missing), ("CONFIRM", []))
+        self.assertTrue(d.customer.address_valid)
+
+    def test_suggestions_are_listed(self):
+        m = "ขอผัดไทยกุ้งสด 1"
+        reply = self.make({m: order([("ผัดไทยกุ้งสด", 1, {})])}).handle(UID, m)[0]
+        self.assertIn("ไม่พบเมนู 'ผัดไทยกุ้งสด'", reply)
+        self.assertIn("เมนูที่แนะนำ: ข้าวผัดกุ้ง", reply)
 
 
 class TestClarify(Base):
@@ -186,8 +322,8 @@ class TestSafety(Base):
                          self.store.orders_dir.exists() else [], [])
 
     def test_model_cannot_call_write_tool(self):
-        a = self.make({MSG_ORDER: GOOD_ORDER}, write_tool_attack=True)
-        a.handle(UID, MSG_ORDER)
+        a = self.make({"ชา 1": order([("ชา", 1, {})])}, write_tool_attack=True)
+        a.handle(UID, "ชา 1")                     # an unclear name, so the model loop runs
         denied = [e for e in self.events("tool_call") if e["tool"] == "draft_order_manager"]
         self.assertTrue(denied and not denied[0]["ok"])
         self.assertIn("Permission denied", denied[0]["error"])

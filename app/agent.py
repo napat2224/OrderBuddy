@@ -1,11 +1,13 @@
-"""M8 - Agent loop used in the RESOLVE state.
+"""M8 - RESOLVE: match what the customer wrote to menu SKUs.
 
-The model gets ONLY product_search and stock_checker, calls them in a bounded
-loop (max_rounds), then returns its choice as JSON. Code then re-checks every
-sku, so a wrong model answer can never reach the price or the order.
+Code decides whatever it can: one clear match is used, no match goes to CLARIFY. That
+is most messages, and it costs no model call (the loop took 4 calls, 13-25 s per message).
 
-If the loop fails (bad JSON, no answer) we fall back to code matching, so the
-order flow never stops because of the model.
+Only a name that fits several items equally ("ชา", "ข้าว") reaches the agent loop. There
+the model gets ONLY product_search and stock_checker, calls them in a bounded loop
+(max_rounds), then returns its choice as JSON. Code accepts the answer only if it is one
+of those items, so a wrong model answer can never reach the price or the order. If the
+loop fails, the customer is asked to choose.
 """
 from __future__ import annotations
 
@@ -17,6 +19,8 @@ from harness import ask_structured, build_messages, execute, tool_defs, tool_mes
 
 from .schemas import SKU_PATTERN, ExtractedItem
 from .tools import MODEL_TOOLS
+
+MIN_SCORE = 0.85   # below this a name is only a suggestion: "ผัดไทยกุ้งสด" is not ข้าวผัดกุ้ง
 
 
 class ResolvedItem(BaseModel):
@@ -65,12 +69,33 @@ def resolve_with_model(h, items: list[ExtractedItem], *, run_id: str,
     return {r.index: r.sku for r in res.value.items if 0 <= r.index < len(items)}
 
 
-def resolve_with_code(h, items: list[ExtractedItem], *, run_id: str,
-                      min_score: float = 0.8) -> dict[int, Optional[str]]:
-    """Deterministic fallback: best product_search hit with a high score."""
-    out = {}
+def resolve_items(h, items: list[ExtractedItem], *, run_id: str, use_model: bool = True,
+                  max_rounds: int = 4) -> dict[int, Optional[str]]:
+    """{item index: sku, or None when the customer has to be asked}.
+
+    Stock plays no part here: a sold-out item keeps its sku so that the state machine
+    can say it is sold out instead of "not on the menu".
+    """
+    mapping: dict[int, Optional[str]] = {}
+    unclear: dict[int, set[str]] = {}
     for i, it in enumerate(items):
-        r = call_tool(h, "product_search", {"query": it.text, "top_k": 1}, run_id=run_id)
-        hit = r["result"][0] if r["ok"] and r["result"] else None
-        out[i] = hit["sku"] if hit and hit["score"] >= min_score else None
-    return out
+        r = call_tool(h, "product_search", {"query": it.text, "top_k": 5}, run_id=run_id)
+        hits = [x for x in (r["result"] if r["ok"] else []) if x["score"] >= MIN_SCORE]
+        best = [x["sku"] for x in hits if x["score"] == hits[0]["score"]]
+        mapping[i] = best[0] if len(best) == 1 else None
+        if len(best) > 1:
+            unclear[i] = set(best)
+
+    rejected = []
+    if use_model and unclear:
+        order = list(unclear)
+        answer = resolve_with_model(h, [items[i] for i in order], run_id=run_id,
+                                    max_rounds=max_rounds) or {}
+        for pos, sku in answer.items():
+            if sku in unclear[order[pos]]:
+                mapping[order[pos]] = sku
+            elif sku:
+                rejected.append(f"{items[order[pos]].text}: {sku}")
+    h.log.write("resolve", run_id=run_id, mapping={items[i].text: s for i, s in mapping.items()},
+                unclear=[items[i].text for i in unclear], rejected=rejected)
+    return mapping

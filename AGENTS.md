@@ -14,8 +14,8 @@ LINE -> ngrok -> app/main.py (/webhook) -> app/state_machine.py
      -> Harness (models via Ollama, tools via executor) -> drafts/, orders/ (JSON files)
 ```
 
-Models (profiles in `Harness/config.yaml`): `router` + `fast` = qwen3:4b,
-`reasoning` = qwen3:8b, `vision` = gemma3:4b. There is no database.
+Models (profiles in `Harness/config.yaml`): `router` = qwen3:1.7b, `fast` + `reasoning` =
+qwen3:4b, `vision` = qwen3-vl:2b. There is no database.
 
 ## Layout and owners
 
@@ -26,11 +26,12 @@ Models (profiles in `Harness/config.yaml`): `router` + `fast` = qwen3:4b,
 | `Harness/prompts/*@vN.txt` | Prompts (M3) | ฟลุ๊ค |
 | `app/schemas.py` | Shared Pydantic schemas (M4) | เปรม |
 | `app/state_machine.py` | States, transitions, permissions (M9, M19) | เปรม |
-| `app/agent.py` | Tool-calling loop in RESOLVE (M8) | เปรม |
+| `app/agent.py` | RESOLVE: code matching, tool-calling loop for unclear names (M8) | เปรม |
 | `app/session.py` | Drafts, chat history, orders on disk (M12) | เปรม |
 | `app/main.py`, `app/line_adapter.py` | FastAPI + LINE (M17) | เปรม |
 | `app/router.py` | Intent + profile choice: rules, model, guard (M10-M11) | ฟลุ๊ค |
 | `app/checks.py` | Domain checks on model output, reply guard (M5) | ฟลุ๊ค |
+| `app/trace.py`, `app/debug.py` | Model reply log, debug commands | เปรม |
 | `app/tools/__init__.py` | The 5 tools (M6) | บีม |
 | `app/catalog.py`, `data/*.json` | Menu, stock, shop settings | บีม |
 | `eval/` | Test tasks, metrics, C1-C3 comparison (M20) | บีม |
@@ -57,6 +58,23 @@ ngrok http 8000
 update a test in `tests/`. The FakeClient in `tests/test_agent_offline.py` plays the
 models, so you can test the whole flow without a GPU.
 
+## Debugging
+
+Every message gets a `run_id`. Each step is one readable line in the server terminal and
+in `Harness/logs/app.log`; the full detail goes to `Harness/logs/calls.jsonl`.
+
+```bash
+tail -f Harness/logs/app.log                           # watch the log live
+python -m app.debug extract "ขอกะเพราหมูกรอบ 2 จาน"   # only EXTRACT, one message (needs Ollama)
+python -m app.debug chat                               # full flow without LINE (needs Ollama)
+python -m app.debug last 3                             # the last 3 messages from the log
+python -m app.debug run r-1234abcd                     # one message by run_id
+```
+
+In the output, `llm_trace` is the model's raw reply, `extract` is the result after checks
+(`dropped` = what code removed), `resolve` is the menu match (`unclear` = sent to the model),
+and `agent_error` has the traceback.
+
 ## Contracts: do not break these
 
 Other people's code depends on them. To change one, tell the team and update this
@@ -79,7 +97,8 @@ file, the spec doc and the tests in the same commit.
    `pick_profile(route, has_image) -> "fast" | "reasoning" | "vision"`.
 4. **Prompt variables**: `route` ($open_order, $last_bot), `extract` ($menu, $current),
    `extract_image` ($menu, $current, $caption), `clarify` ($order, $problems,
-   $suggestions), `answer` ($menu), `resolve` (none).
+   $suggestions; not used at runtime, code writes that message), `answer` ($menu),
+   `resolve` (none).
 5. **Profile names** in `config.yaml`: `router`, `fast`, `reasoning`, `vision`.
 6. **Agent entry point**: `OrderAgent.handle(line_user_id, text="", image_b64=None) -> list[str]`.
 
@@ -124,6 +143,6 @@ addresses in tests and examples, never real customer data.
 - Python: type hints, small functions, docstrings say *why*. Comments in English.
 - Customer-facing text is Thai and ends with ครับ.
 - Prices are integer THB.
-- Logs: `Harness/logs/calls.jsonl`; one `run_id` per LINE message. Events: `message`,
-  `route`, `route_source` (rule / model / guard / fallback), `state`, `llm_call`,
-  `tool_call`, `safe_failure`, `agent_error`.
+- Logs: `Harness/logs/app.log` (to read), `Harness/logs/calls.jsonl` (full data); one `run_id` per LINE message. Events: `message`,
+  `route`, `route_source` (rule / model / guard / fallback), `state`, `extract`, `resolve`, `llm_call`,
+  `llm_trace`, `tool_call`, `safe_failure`, `agent_error`, `reply`.
