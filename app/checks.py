@@ -61,6 +61,7 @@ def _named_but_missing(text: str, order: ExtractedOrder) -> list[str]:
         return []
     got = [_squash(i.text) for i in order.items]
     return [m.name for m in catalog().values() if _squash(m.name) in said
+            and not _zero_qty(m.name, said)
             and not any(g and (g in _squash(m.name) or _squash(m.name) in g) for g in got)]
 
 
@@ -88,7 +89,8 @@ def clean_extracted(order: ExtractedOrder, text: str, draft: DraftOrder, history
 
     def refused(name: str) -> bool:
         n = _squash(name)
-        return any(p in newest for p in (f"ไม่เอา{n}", f"ไม่ใส่{n}", f"ยกเลิก{n}", f"เอา{n}ออก"))
+        return (any(p in newest for p in (f"ไม่เอา{n}", f"ไม่ใส่{n}", f"ยกเลิก{n}", f"เอา{n}ออก"))
+                or _zero_qty(name, newest))
 
     def asked_for(value: str) -> str | None:
         names = [v.split("+")[0].strip() for v in value.split("/")]
@@ -149,6 +151,15 @@ def clean_reply(raw: str, system_prompt: str, fallback: str) -> str:
     if "ครับ" not in reply[-12:]:
         reply += "ครับ"
     return reply
+
+
+def _zero_qty(name: str, said: str) -> bool:
+    """True for "ชาไทย0แก้ว" in squashed text: zero means none, and the schema has no qty 0.
+
+    (?!\\d) keeps a phone right after the name ("ชาไทย0812345678") from counting as zero.
+    """
+    return re.search(re.escape(_squash(name)) + r"(?:x|จำนวน)?(?:0|ศูนย์)(?!\d)", said,
+                     flags=re.I) is not None
 
 
 def _squash(s: str) -> str:

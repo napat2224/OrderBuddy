@@ -166,6 +166,14 @@ class TestNamedItemMustBeInOrder(unittest.TestCase):
         self.check("ไม่เอาชาเย็น", "ข้าวผัดกุ้ง")
         self.check("เอาชาไทยแทนข้าวผัดกุ้ง", "ชาไทย")
 
+    def test_zero_quantity_is_not_an_order(self):
+        for text in ("สั่งชาไทย 0 แก้ว", "ชาไทย x0", "ชาไทยศูนย์แก้ว"):
+            self.check(text)
+
+    def test_phone_after_a_dish_is_not_zero_quantity(self):
+        with self.assertRaises(DomainError):
+            self.check("ชาไทย 0812345678")
+
     def test_photos_are_skipped(self):
         extract_check("ชาเย็น", EMPTY, [], True)(ExtractedOrder(items=[]))
 
@@ -235,6 +243,12 @@ class TestCleanExtracted(unittest.TestCase):
         self.assertEqual([i.text for i in out.items], ["ข้าวผัดกุ้ง"])
         self.assertEqual(dropped, ["ชาไทย refused"])
 
+    def test_zero_quantity_item_is_removed(self):
+        order = ExtractedOrder(items=[{"text": "ชาไทย", "qty": 1}])
+        out, dropped = clean_extracted(order, "สั่งชาไทย 0 แก้ว", EMPTY, [], False)
+        self.assertEqual(out.items, [])
+        self.assertEqual(dropped, ["ชาไทย refused"])
+
     def test_refused_addon_is_removed(self):
         item = {"text": "ข้าวผัดกุ้ง", "qty": 1, "addons": ["ไข่ดาว"]}
         self.assertEqual(self.clean(item, "ข้าวผัดกุ้ง 1 ไม่ใส่ไข่ดาว")[0].addons, [])
@@ -301,7 +315,7 @@ class TestPrompts(unittest.TestCase):
                           log_file=Path(tempfile.mkdtemp()) / "c.jsonl").prompts
         for name in ("route", "extract_image", "clarify"):
             self.assertEqual(prompts.get(name).version, 2, name)
-        self.assertEqual(prompts.get("extract").version, 3)
+        self.assertEqual(prompts.get("extract").version, 4)
 
 
 if __name__ == "__main__":
