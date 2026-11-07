@@ -86,6 +86,13 @@ class TestGuard(RouterBase):
         r = self.classify("ok เพิ่มชาไทย 1", OPEN, {"intent": "confirm", "complexity": "simple"})
         self.assertEqual(r.intent, "modify_order")
 
+    def test_confirm_needs_a_confirm_word(self):
+        # confirm submits the order: a model label alone is not enough
+        r = self.classify("เผ็ดน้อย", OPEN, {"intent": "confirm", "complexity": "simple"})
+        self.assertEqual((r.intent, self.source()), ("modify_order", "guard"))
+        r = self.classify("ใช่เลย", OPEN, {"intent": "confirm", "complexity": "simple"})
+        self.assertEqual(r.intent, "confirm")
+
     def test_four_items_is_complex(self):
         r = self.classify("กะเพราหมูกรอบ 1 ข้าวผัดกุ้ง 1 ต้มยำกุ้ง 1 ชาไทย 2", EMPTY,
                           {"intent": "new_order", "complexity": "simple"})
@@ -313,9 +320,10 @@ class TestPrompts(unittest.TestCase):
     def test_latest_versions(self):
         prompts = Harness(client=ScriptedClient(),
                           log_file=Path(tempfile.mkdtemp()) / "c.jsonl").prompts
-        for name in ("route", "extract_image", "clarify"):
+        for name in ("route", "clarify"):
             self.assertEqual(prompts.get(name).version, 2, name)
-        self.assertEqual(prompts.get("extract").version, 4)
+        self.assertEqual(prompts.get("extract_image").version, 3)   # qty null when not written
+        self.assertEqual(prompts.get("extract").version, 5)
 
 
 if __name__ == "__main__":

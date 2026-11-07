@@ -45,7 +45,7 @@ def resolve_with_model(h, items: list[ExtractedItem], *, run_id: str,
                        max_rounds: int = 4) -> Optional[dict[int, Optional[str]]]:
     """Tool-calling loop -> {item index: sku or None}. None = the loop failed."""
     p = h.prompts.get("resolve")
-    listing = "\n".join(f"{i}. {it.text} x{it.qty}" for i, it in enumerate(items))
+    listing = "\n".join(f"{i}. {it.text} x{it.qty or 1}" for i, it in enumerate(items))
     msgs = build_messages(p.render(), user=listing)
     defs = tool_defs(MODEL_TOOLS)
 

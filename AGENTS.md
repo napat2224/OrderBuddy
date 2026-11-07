@@ -14,8 +14,8 @@ LINE -> ngrok -> app/main.py (/webhook) -> app/state_machine.py
      -> Harness (models via Ollama, tools via executor) -> drafts/, orders/ (JSON files)
 ```
 
-Models (profiles in `Harness/config.yaml`): `router` = qwen3:1.7b, `fast` + `reasoning` =
-qwen3:4b, `vision` = qwen3-vl:2b. There is no database.
+Models (profiles in `Harness/config.yaml`), all local: `router` + `fast` + `reasoning` =
+qwen3:4b (one model in RAM, fits an 8 GB Mac), `vision` = qwen3-vl:2b. There is no database.
 
 ## Layout and owners
 
@@ -82,6 +82,8 @@ file, the spec doc and the tests in the same commit.
 
 1. **Schemas** (`app/schemas.py`): field names and types of `RouteResult`,
    `ExtractedOrder`, `DraftOrder`, `FinalOrder`. All use `extra="forbid"`.
+   `ExtractedItem.qty` is `Optional[int]` 0-20: `None` = no number written (the bot asks
+   how many, missing code `qty:<sku>`), `0` = remove the item.
 2. **Tool names, Args and permissions** (`app/tools/__init__.py`):
 
    | Tool | Permission | Called by |
@@ -110,6 +112,8 @@ file, the spec doc and the tests in the same commit.
   DONE (submit) and cancel.
 - An order is written to `orders/` only when the previous state is CONFIRM, `missing`
   is empty AND the newest message has intent `confirm`. The tool checks it again.
+  `router.classify` only returns `confirm` when the text has a confirm word (ยืนยัน, ok,
+  ตกลง...), so an answer like "2" can never submit an order.
 - Money and stock are computed by code (`price_calculator`, `stock_checker`), never by
   a model. Every sku from a model is re-checked against the catalog.
 - Stock is cut only when an order is submitted (`draft_order_manager` submit), all or

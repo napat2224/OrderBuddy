@@ -12,7 +12,7 @@ profiles:
   router:
     model: qwen3:4b-q4_K_M   # same model and num_ctx as fast: swapping cost about 18 s per message
     temperature: 0
-    num_ctx: 8192
+    num_ctx: 8192        # same as fast/reasoning: a different num_ctx makes Ollama reload the model
     num_predict: 128
     keep_alive: 30m
     think: false
@@ -25,6 +25,8 @@ profiles:
     keep_alive: 10m
     think: false         # qwen3 reasoning off: faster, cleaner JSON
 
+  # 8 GB Mac: reasoning shares qwen3:4b with router/fast (one model in RAM, same num_ctx
+  # so it is not reloaded). Was qwen3:8b, too heavy next to the vision model.
   reasoning:
     model: qwen3:4b-q4_K_M
     temperature: 0
@@ -34,7 +36,7 @@ profiles:
     think: false
 
   vision:
-    model: qwen3-vl:2b-instruct
+    model: qwen3-vl:2b-instruct   # loads only when a photo arrives
     temperature: 0
     num_ctx: 8192
     num_predict: 768

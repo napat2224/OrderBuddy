@@ -40,6 +40,10 @@ _EDIT_CUES = re.compile(r"เพิ่ม|เปลี่ยน|แทน|ไม
 # words that make a change to an open order worth the reasoning model
 _CHANGE_CUES = re.compile(r"เปลี่ยน|แทน|ไม่เอา|เอาออก|ลด|เหลือ|เพิ่มเป็น|ยกเลิก")
 _CONDITION = re.compile(r"ถ้า")
+# confirm submits the order, so a model's "confirm" must be backed by a confirm word
+# (a 4B model labelled the answer "2" as confirm)
+_CONFIRM_WORD = re.compile(r"(ยืนยัน|ok|โอเค|ได้เลย|ตกลง|ถูกต้อง|yes|confirm|สั่งเลย|เอาเลย|จัดเลย|ใช่|👍)",
+                           re.I)
 
 
 def classify(h, text: str, draft: DraftOrder, last_bot: str, *, run_id: str,
@@ -103,6 +107,8 @@ def guard(route: RouteResult, text: str, draft: DraftOrder) -> RouteResult:
         intent = "modify_order"          # "ยกเลิกชาเย็น" removes one item, not the order
     if intent == "confirm" and (named or has_digit or _EDIT_CUES.search(text)):
         intent = "modify_order"          # "ok แต่เพิ่มชาเย็น 1" still changes the order
+    if intent == "confirm" and not _CONFIRM_WORD.search(text):
+        intent = "modify_order" if draft.items else "other"   # no confirm word, no submit
     if intent == "modify_order" and not draft.items:
         intent = "new_order"
     if intent in ("new_order", "modify_order") and (

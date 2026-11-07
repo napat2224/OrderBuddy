@@ -17,6 +17,7 @@ Safety (M19):
 from __future__ import annotations
 
 import json
+import re
 import traceback
 from dataclasses import dataclass
 from typing import Optional
@@ -96,9 +97,10 @@ class OrderAgent:
                                  state=draft.state, error=f"{type(e).__name__}: {e}",
                                  trace=traceback.format_exc())
                 self._log_state(run_id, draft.state, "ERROR")
+                self._log_reply(run_id, line_user_id, "ERROR", [MSG["error"]])
                 return [MSG["error"]]
 
-            self.h.log.write("reply", run_id=run_id, state=draft.state, replies=replies)
+            self._log_reply(run_id, line_user_id, draft.state, replies)
 
             if closed:                       # submitted or cancelled
                 self.store.clear_history(line_user_id)
@@ -166,6 +168,9 @@ class OrderAgent:
             self._goto(run_id, draft, "CLARIFY")
             return [MSG["not_understood"]]
         self._merge_customer(draft, ext)
+        if not image_b64:
+            _drop_guessed_qty(ext.items, text, draft)
+        ext.items = [it for it in ext.items if it.qty != 0]    # qty 0 = customer removed it
         if not ext.items:
             draft.items, draft.missing = [], ["items"]
             self._goto(run_id, draft, "CLARIFY")
@@ -217,8 +222,8 @@ class OrderAgent:
     # --------------------------------------------------------------- EXTRACT
     def _extract(self, run_id, draft, history, text, image_b64, profile):
         current = json.dumps({
-            "items": [{"text": l.name, "qty": l.qty, "options": l.options, "addons": l.addons}
-                      for l in draft.items],
+            "items": [{"text": l.name, "qty": None if _qty_unknown(draft, l) else l.qty,
+                       "options": l.options, "addons": l.addons} for l in draft.items],
             "customer": {"name": draft.customer.name, "phone": draft.customer.phone,
                          "address": draft.customer.address},
             "fulfillment": draft.fulfillment}, ensure_ascii=False)
@@ -263,6 +268,7 @@ class OrderAgent:
     def _build_lines(self, run_id, items: list[ExtractedItem], mapping):
         lines, missing, problems, suggestions = [], [], [], []
         menu = catalog()
+        in_order = {mapping.get(i) for i in range(len(items))}   # never suggest these again
         for i, it in enumerate(items):
             sku = mapping.get(i)
             if sku not in menu:                       # model answer re-checked by code
@@ -270,7 +276,8 @@ class OrderAgent:
                 problems.append(f"ไม่พบเมนู '{it.text}'")
                 r = call_tool(self.h, "product_search", {"query": it.text, "top_k": 3},
                               run_id=run_id)
-                suggestions += [x["name"] for x in r.get("result") or []]
+                suggestions += [x["name"] for x in r.get("result") or []
+                                if x.get("sku") not in in_order and stock().get(x["sku"], 0) > 0]
                 continue
             m = menu[sku]
             bad_opts = {k: v for k, v in it.options.items() if v not in m.options.get(k, [])}
@@ -278,17 +285,22 @@ class OrderAgent:
             if bad_opts or bad_addons:
                 missing.append(f"option:{sku}")
                 problems.append(f"'{m.name}' ไม่มีตัวเลือก {list(bad_opts.values()) + bad_addons}")
-            line = OrderLine(sku=sku, name=m.name, qty=it.qty, note=it.note,
+            # qty None: placeholder 1, marked missing, so it is never priced or summarised
+            line = OrderLine(sku=sku, name=m.name, qty=it.qty or 1, note=it.note,
                              options={k: v for k, v in it.options.items() if k not in bad_opts},
                              addons=[a for a in it.addons if a in m.addons])
             lines.append(line)
+            if it.qty is None:
+                missing.append(f"qty:{sku}")
+                problems.append(f"ยังไม่ทราบจำนวน '{m.name}'")
+                continue
             r = call_tool(self.h, "stock_checker", {"sku": sku, "qty": it.qty}, run_id=run_id)
             if not r["ok"] or not r["result"]["enough"]:
                 left = r["result"]["available"] if r["ok"] else 0
                 missing.append(f"stock:{sku}")
                 problems.append(f"'{m.name}' เหลือ {left} ที่" if left else f"'{m.name}' หมด")
                 suggestions += [x.name for x in menu.values()
-                                if x.category == m.category and x.sku != sku
+                                if x.category == m.category and x.sku not in in_order
                                 and stock().get(x.sku, 0) >= it.qty][:2]
         return lines, missing, problems, list(dict.fromkeys(suggestions))
 
@@ -368,3 +380,40 @@ class OrderAgent:
     def _log_state(self, run_id, src, dst) -> None:
         self.h.log.write("state", run_id=run_id, src=src, dst=dst)
 
+    def _log_reply(self, run_id, line_user_id, state, replies) -> None:
+        """Pairs with the "message" event (same run_id) so each turn can be reviewed later."""
+        self.h.log.write("reply", run_id=run_id, user=line_user_id, state=state, replies=replies)
+
+
+_QTY = re.compile(r"(?<!\d)\d{1,2}(?![\d/])|หนึ่ง|นึง|เดียว|สอง|สาม|สี่|ห้า|หก|เจ็ด|แปด|เก้า|สิบ")
+_NOT_ITEM = re.compile(r"ส่ง|รับ|โทร|เบอร์|ที่อยู่|บ้านเลขที่")   # text after this is not a quantity
+
+
+def _drop_guessed_qty(items: list[ExtractedItem], text: str, draft: DraftOrder) -> None:
+    """The model writes qty 1 even when no number was given. For a new item whose name is in
+    the message, look for a number between the name and the next item name; none -> None."""
+    if "แทน" in text:
+        return                        # "เอา X แทน": a replacement keeps the old quantity
+    menu = catalog()
+    names = {n: x for x in menu.values() for n in [x.name, *x.aliases]}
+    hits = sorted((text.find(n), n) for n in names if n in text)
+    ordered = {l.name for l in draft.items if not _qty_unknown(draft, l)}
+    for it in items:
+        if it.qty in (None, 0) or it.text in ordered or it.text not in names:
+            continue
+        own = {names[it.text].name, *names[it.text].aliases}
+        pos = [(p, n) for p, n in hits if n in own]
+        if not pos:
+            continue                  # name written differently: trust the model
+        start = pos[0][0] + len(max((n for p, n in pos if p == pos[0][0]), key=len))
+        end = min([p for p, n in hits if p >= start and n not in own] + [len(text)])
+        segment = _NOT_ITEM.split(text[start:end])[0]
+        if pos[0][0] == hits[0][0]:   # first item: "เอา 2 กะเพรา" puts the number before it
+            segment += " " + text[:pos[0][0]]
+        if not _QTY.search(segment):
+            it.qty = None
+
+
+def _qty_unknown(draft: DraftOrder, line: OrderLine) -> bool:
+    """The line's qty is a placeholder: the customer has not said how many yet."""
+    return f"qty:{line.sku}" in draft.missing
