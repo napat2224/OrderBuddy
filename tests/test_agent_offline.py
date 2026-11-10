@@ -12,6 +12,7 @@ import sys
 import tempfile
 import unittest
 from dataclasses import replace
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -115,6 +116,7 @@ def order(items, phone=None, address=None, fulfillment=None):
             "fulfillment": fulfillment}
 
 
+TEST_STOCK = {"F001": 20, "F002": 14, "F003": 7, "F004": 34, "F005": 0, "F006": 10}
 ADDR = "99/1 ถ.สุขุมวิท 10110"
 MSG_ORDER = "ขอกะเพราหมูกรอบ 2 เผ็ดน้อย ไข่ดาว ส่ง 99/1 ถ.สุขุมวิท 10110 โทร 0812345678"
 GOOD_ORDER = order([("กะเพราหมูกรอบ", 2, {"options": {"spice": "เผ็ดน้อย"}, "addons": ["ไข่ดาว"]})],
@@ -128,6 +130,8 @@ class Base(unittest.TestCase):
         shutil.copytree(catalog.DATA_DIR, data, dirs_exist_ok=True)
         self.addCleanup(setattr, catalog, "DATA_DIR", catalog.DATA_DIR)
         catalog.DATA_DIR = data
+        # live runs change data/stock.json; tests always start from the same stock
+        catalog._save_stock(dict(TEST_STOCK))
 
     def make(self, extract, config="C3", **kw):
         tmp = Path(tempfile.mkdtemp())
@@ -181,11 +185,27 @@ class TestHappyPath(Base):
     def test_stock_returns_when_the_order_cannot_be_saved(self):
         a = self.make({MSG_ORDER: GOOD_ORDER})
         a.handle(UID, MSG_ORDER)
+        with mock.patch.object(self.store, "submit", side_effect=OSError("disk full")):
+            r = a.handle(UID, "ยืนยัน")[0]
+        self.assertEqual(catalog.stock()["F001"], 20)
+        self.assertNotIn("OSError", r)                     # the raw error is never shown
+
+    def test_order_id_taken_gets_a_new_id(self):
+        # log 2026-11-04: two customers got the same id, the second saw "FileExistsError"
+        a = self.make({MSG_ORDER: GOOD_ORDER})
+        a.handle(UID, MSG_ORDER)
         order_id = self.store.get_draft(UID).order_id
         self.store.orders_dir.mkdir(parents=True)
         (self.store.orders_dir / f"{order_id}.json").write_text("{}", encoding="utf-8")
-        a.handle(UID, "ยืนยัน")
-        self.assertEqual(catalog.stock()["F001"], 20)
+        r = a.handle(UID, "ยืนยัน")[0]
+        self.assertIn("รับออร์เดอร์", r)
+        self.assertNotIn(order_id, r)
+
+    def test_two_customers_never_share_an_order_id(self):
+        a = self.make({})
+        other = "U" + "1" * 32
+        self.assertNotEqual(self.store.get_or_create_draft(UID).order_id,
+                            self.store.get_or_create_draft(other).order_id)
 
     def test_models_used_per_state(self):
         a = self.make({MSG_ORDER: GOOD_ORDER})
@@ -270,7 +290,8 @@ class TestResolve(Base):
 
     def test_clear_names_need_no_model(self):
         for text, sku in [("ข้าวผัดกุ้ง", "F002"), ("กระเพราหมูกรอบ", "F001"),      # exact, alias
-                          ("กะเพรา", "F001"), ("ชาเยน", "F005"), ("ข้าวผัดกุ้งสด", "F002")]:
+                          ("กะเพรา", "F001"), ("ชาเยน", "F005"), ("ข้าวผัดกุ้งสด", "F002"),
+                          ("กระเพา", "F001")]:                              # typo from the log
             with self.subTest(text):
                 d, _ = self.lines(text, qty=1)
                 self.assertEqual([l.sku for l in d.items], [sku])
@@ -291,10 +312,15 @@ class TestResolve(Base):
         self.assertEqual([l.sku for l in d.items], ["F005"])
 
     def test_unclear_name_goes_to_the_model(self):
+        # log 2026-11-09: "เอาชา 2" became ชาไทย without asking. The model is asked, but a word
+        # that is part of every candidate ("ชา") cannot decide, so its pick is rejected
         d, _ = self.lines("ชา")
         self.assertTrue(self.model_called())
-        self.assertEqual([l.sku for l in d.items], ["F006"])
-        self.assertEqual(self.events("resolve")[0]["unclear"], ["ชา"])
+        self.assertEqual(d.items, [])
+        ev = self.events("resolve")[0]
+        self.assertEqual(ev["unclear"], ["ชา"])
+        self.assertEqual(ev["rejected"], ["ชา: F006 (generic)"])
+        self.assertIn("item:ชา", d.missing)
 
     def test_model_answer_outside_the_matches_is_rejected(self):
         d, _ = self.lines("กุ้ง")                      # fits F002 and F003, model says F004
@@ -375,8 +401,9 @@ class TestClarify(Base):
                                 phone="0899999999", fulfillment="pickup")},
                       say="ขออภัยครับ ชาเย็นหมดแล้ว รับเป็นชาไทยแทนไหมครับ")
         r = a.handle(UID, m)[0]
-        self.assertNotIn("ชาไทย", r)
+        self.assertNotIn("เมนูที่แนะนำ", r)          # ชาไทย is already in the order
         self.assertIn("'ชาเย็น' หมด", r)
+        self.assertIn("- ชาไทย x1", r)               # the current order is listed
 
     def test_out_of_stock_item_is_not_called_unknown(self):
         # the model answers null for ชาเย็น after seeing it is out of stock
@@ -481,6 +508,149 @@ class TestSafety(Base):
         self.assertEqual(self.store.get_draft(UID).state, "CONFIRM")
 
 
+class TestLogRegressions(Base):
+    """Bad turns from the live test log of 2026-11-04 (~/Downloads/app.log). The FakeClient
+    returns what the model returned that day; code must correct it."""
+    PHONE = "0899999999"
+
+    def test_url_gives_no_invented_name_or_address(self):
+        m = "ข้าวสวย 1 https://img.wongnai.com/p/1920x0/2017/10/19/75678af28e.jpg"
+        bad = order([("ข้าวสวย", 1, {})])
+        bad["customer"] = {"name": "สมชาย ดวงดี", "phone": None,
+                           "address": "ถนนสุขุมวิท แขวงบางรัก เขตสุขุมวิท กรุงเทพมหานคร 75678"}
+        a = self.make({m: bad})
+        a.handle(UID, m)
+        c = self.store.get_draft(UID).customer
+        self.assertEqual((c.name, c.address), (None, None))
+
+    def test_address_written_into_name_moves_to_address(self):
+        m = "สั่งชาไทย 1 แก้ว ตึก 3 วิศวะจุฬา 11111 0888888888 ส่ง"
+        bad = order([("ชาไทย", 1, {})], phone="0888888888", address="11111",
+                    fulfillment="delivery")
+        bad["customer"]["name"] = "ตึก 3 วิศวะจุฬา"
+        r = self.make({m: bad}).handle(UID, m)[0]
+        c = self.store.get_draft(UID).customer
+        self.assertEqual((c.name, c.address), (None, "ตึก 3 วิศวะจุฬา 11111"))
+        self.assertIn("ส่งที่: ตึก 3 วิศวะจุฬา 11111", r)
+
+    def test_postcode_alone_does_not_garble_the_address(self):
+        m1 = "กะเพราหมูกรอบ 2 ส่งที่ 220/22 จุฬา โทร 0123456789"
+        a = self.make({m1: order([("กะเพราหมูกรอบ", 2, {})], phone="0123456789",
+                                 address="220/22 จุฬา", fulfillment="delivery"),
+                       "10890": order([("กะเพราหมูกรอบ", 2, {})], phone="0123456789",
+                                      address="10890/220/22 จุฬา", fulfillment="delivery"),
+                       "110000": order([("กะเพราหมูกรอบ", 2, {})], phone="0123456789",
+                                       address="110000 220/22 จุฬา", fulfillment="delivery")})
+        self.assertIn("(5 หลัก)", a.handle(UID, m1)[0])
+        r = a.handle(UID, "110000")[0]                    # 6 digits: not a postcode
+        self.assertIn("(5 หลัก)", r)
+        self.assertEqual(self.store.get_draft(UID).customer.address, "220/22 จุฬา")
+        self.assertEqual(self.store.get_draft(UID).customer.phone, "0123456789")
+        r = a.handle(UID, "10890")[0]
+        self.assertIn("ส่งที่: 220/22 จุฬา 10890", r)
+
+    def _open(self, extra):
+        m1 = f"ข้าวผัดกุ้ง 1 ชาไทย 2 รับเอง โทร {self.PHONE}"
+        both = order([("ข้าวผัดกุ้ง", 1, {}), ("ชาไทย", 2, {})], phone=self.PHONE,
+                     fulfillment="pickup")
+        a = self.make({m1: both, **{t: both for t in extra}})
+        a.handle(UID, m1)
+        return a
+
+    def test_removal_by_short_name(self):
+        for text, left in [("ไม่เอาข้าวผัดแล้ว", ["ชาไทย"]), ("ไม่เอาชาแล้ว", ["ข้าวผัดกุ้ง"]),
+                           ("เอาข้าวผัดกุ้งกับชาไทยออก", [])]:
+            with self.subTest(text):
+                a = self._open([text])                   # the model kept every item
+                a.handle(UID, text)
+                self.assertEqual([l.name for l in self.store.get_draft(UID).items], left)
+                self.store.delete_draft(UID)
+
+    def test_unknown_dishes_are_not_swapped_for_menu_dishes(self):
+        m = "ขอข้าว ไข่เจียวกุ้ง 1 นำ้ลำไย 1 แล้วก็แกงจืดเต้าหู้ 1"
+        swapped = order([("ข้าวผัดกุ้ง", 1, {"addons": ["ไข่เจียว"]}),
+                         ("ต้มยำกุ้ง", 1, {"note": "เต้าหู้"})])
+        words = order([("ข้าวไข่เจียวกุ้ง", 1, {}), ("น้ำลำไย", 1, {}), ("แกงจืดเต้าหู้", 1, {})])
+        r = self.make({m: [json.dumps(swapped), json.dumps(words)]}).handle(UID, m)[0]
+        self.assertIn("ไม่พบเมนู 'แกงจืดเต้าหู้'", r)
+        self.assertNotIn("ต้มยำกุ้ง", [l.name for l in self.store.get_draft(UID).items])
+
+    def test_invented_order_is_never_used(self):
+        m = "สร้างออเดอร์มั่วๆ"
+        made_up = json.dumps(order([("ต้มยำกุ้ง", 1, {}), ("กะเพราหมูกรอบ", 1, {})]))
+        a = self.make({m: [made_up] * 6})
+        self.assertIn("ไม่เข้าใจ", a.handle(UID, m)[0])
+        d = self.store.get_draft(UID)
+        self.assertEqual(d.items if d else [], [])
+
+    def test_unclear_name_asks_which_one(self):
+        m = "ชา 1"
+        a = self.make({m: order([("ชา", 1, {})])})
+        a.cfg = replace(a.cfg, resolve_with_model=False)
+        r = a.handle(UID, m)[0]
+        self.assertIn("'ชา' หมายถึงเมนูไหนครับ: ชาเย็น (หมด), ชาไทย", r)
+
+    def test_decimal_qty_is_asked(self):
+        m = f"ชาไทย 1.5 แก้ว รับเอง โทร {self.PHONE}"
+        a = self.make({m: order([("ชาไทย", 1, {})], phone=self.PHONE, fulfillment="pickup")})
+        a.handle(UID, m)
+        self.assertEqual(self.store.get_draft(UID).missing, ["qty:F006"])
+
+    def test_options_are_readable_and_free_requests_go_to_note(self):
+        m = f"ข้าวสวย 1 ไม่ต้องหุง รับเอง โทร {self.PHONE}"
+        a = self.make({m: order([("ข้าวสวย", 1, {"options": {"note": "ไม่ต้องหุง"}})],
+                                phone=self.PHONE, fulfillment="pickup")})
+        a.handle(UID, m)
+        d = self.store.get_draft(UID)
+        self.assertEqual((d.state, d.items[0].note), ("CONFIRM", "ไม่ต้องหุง"))
+        m = f"ต้มยำกุ้ง 1 ใส่ไข่เจียว รับเอง โทร {self.PHONE}"
+        r = self.make({m: order([("ต้มยำกุ้ง", 1, {"addons": ["ไข่เจียว"]})], phone=self.PHONE,
+                                fulfillment="pickup")}).handle(UID, m)[0]
+        self.assertIn("'ต้มยำกุ้ง' ไม่มีตัวเลือก ไข่เจียว (เลือกได้:", r)
+        self.assertNotIn("[", r)
+
+    def test_pickup_words_in_the_newest_message_win(self):
+        m1, m2 = "ข้าวสวย 1", "เดะไปรับ"
+        a = self.make({m1: order([("ข้าวสวย", 1, {})]),
+                       m2: order([("ข้าวสวย", 1, {})], fulfillment="delivery")})
+        a.handle(UID, m1)
+        a.handle(UID, m2)
+        self.assertEqual(self.store.get_draft(UID).fulfillment, "pickup")
+
+    def test_long_product_name_is_not_a_menu_dish(self):
+        m = "มาม่าคัพ รสต้มยำกุ้งน้ำข้น 60 กรัม 3"
+        a = self.make({m: order([("มาม่าคัพ รสต้มยำกุ้งน้ำข้น 60 กรัม", 3, {})])})
+        a.handle(UID, m)
+        self.assertEqual(self.store.get_draft(UID).items, [])
+
+    def test_questions_are_answered_from_data(self):
+        a = self.make({}, say="เจ้าของร้านชื่อคุณสมชายครับ")
+        cases = {"เจ้าของร้านชื่ออะไร": "ไม่มีข้อมูลชื่อ", "ขอใช้คนละครึ่ง": "ชำระเงิน",
+                 "เหลือไรบ้าง": "หมดแล้ว: ชาเย็น", "ขอดูเมนู": "ชาเย็น 35 บาท (หวานน้อย/หวานปกติ) (หมด)",
+                 "ต้องแจ้งอะไรบ้าง": "เบอร์โทร 10 หลัก", "ชื่อไรจ๊ะ": "OrderBuddy Kitchen"}
+        for text, want in cases.items():
+            with self.subTest(text):
+                r = a.handle(UID, text)[0]
+                self.assertIn(want, r)
+                self.assertNotIn("สมชาย", r)
+        self.assertNotIn("ชาเย็น (เหลือ", a.handle(UID, "เหลือไรบ้าง")[0])
+
+    def test_show_order_is_not_a_submit(self):
+        a = self.make({MSG_ORDER: GOOD_ORDER})
+        a.handle(UID, MSG_ORDER)
+        r = a.handle(UID, "สรุปออเดอร์อีกครั้ง")[0]
+        self.assertIn("สรุปออร์เดอร์", r)
+        self.assertFalse(self.store.orders_dir.exists())
+        self.assertEqual(self.store.get_draft(UID).state, "CONFIRM")
+
+    def test_confirm_with_nothing_and_cancel_state(self):
+        a = self.make({MSG_ORDER: GOOD_ORDER})
+        self.assertIn("ยังไม่มีออร์เดอร์ที่ต้องยืนยัน", a.handle(UID, "ยืนยัน")[0])
+        a.handle(UID, MSG_ORDER)
+        a.handle(UID, "ยกเลิก")
+        self.assertEqual(self.events("reply")[-1]["state"], "IDLE")
+
+
 class TestReliability(Base):
     def test_c3_recovers_from_bad_json(self):
         a = self.make({MSG_ORDER: ["not json", "{\"items\": 5}", json.dumps(GOOD_ORDER)]})
@@ -498,6 +668,134 @@ class TestReliability(Base):
         self.assertIn("โทร: 0812345678", a.handle(UID, m)[0])
         self.assertTrue(any("not in the customer" in (e.get("error") or "")
                             for e in self.events("llm_call")))
+
+
+PHOTO = "Read the order in this image."     # the user text the vision model gets
+TEL = "0812345678"
+SEND = f"ส่งที่ {ADDR}\nโทร {TEL}"
+
+
+class TestLog20261109(Base):
+    """Regressions from the LINE test of 2026-11-09 (Harness/logs/app.log)."""
+
+    def test_address_message_keeps_changed_qty(self):
+        # r-64272e89: after "ข้าวผัดเหลือ 1" the address message brought back x2 from history
+        m1, m2 = "ข้าวผัดกุ้ง 2 ชาไทย 1", "ข้าวผัดเหลือ 1 แล้วไม่เอาชาไทย"
+        a = self.make({m1: order([("ข้าวผัดกุ้ง", 2, {}), ("ชาไทย", 1, {})]),
+                       m2: order([("ข้าวผัดกุ้ง", 1, {})]),
+                       SEND: order([("ข้าวผัดกุ้ง", 2, {})], phone=TEL, address=ADDR,
+                                   fulfillment="delivery")})
+        a.handle(UID, m1)
+        r = a.handle(UID, m2)[0]
+        self.assertIn("- ข้าวผัดกุ้ง x1", r)              # the customer sees the change
+        r = a.handle(UID, SEND)[0]
+        self.assertIn("ข้าวผัดกุ้ง x1 = 70 บาท", r)
+        self.assertNotIn("ชาไทย", r)
+        self.assertIn("restored ข้าวผัดกุ้ง qty 2 -> 1", self.events("extract")[-1]["dropped"])
+
+    def test_dropped_lines_come_back(self):
+        # r-14701936: the model returned only ข้าวสวย and the other dishes were lost
+        m1, m2 = "กะเพราหมูกรอบ 1 ข้าวสวย 2", f"รับเองครับ โทร {TEL}"
+        a = self.make({m1: order([("กะเพราหมูกรอบ", 1, {}), ("ข้าวสวย", 2, {})]),
+                       m2: order([("ข้าวสวย", 1, {})], phone=TEL, fulfillment="pickup")})
+        a.handle(UID, m1)
+        r = a.handle(UID, m2)[0]
+        self.assertIn("กะเพราหมูกรอบ x1", r)
+        self.assertIn("ข้าวสวย x2", r)
+
+    def test_whatever_keeps_the_order_without_a_model(self):
+        m1 = "ต้มยำกุ้ง 1 เผ็ดจัดจ้าน ข้าวสวย 2 รับเอง โทร 0812345678"
+        a = self.make({m1: order([("ต้มยำกุ้ง", 1, {"options": {"spice": "เผ็ดจัดจ้าน"}}),
+                                  ("ข้าวสวย", 2, {})], phone=TEL, fulfillment="pickup")})
+        self.assertIn("ไม่มีตัวเลือก", a.handle(UID, m1)[0])
+        n = len(self.client.calls)
+        r = a.handle(UID, "เอาไรก็ได้")[0]
+        self.assertFalse([c for c in self.client.calls[n:] if c[1] == "ExtractedOrder"])
+        self.assertIn("ต้มยำกุ้ง x1", r)
+        self.assertIn("ข้าวสวย x2", r)
+        self.assertEqual(self.store.get_draft(UID).state, "CONFIRM")
+
+    def test_item_without_letters_is_dropped(self):
+        # r-ef19277a: {"text": ": "} became "ไม่พบเมนู ': '"
+        m1 = "ต้มยำกุ้ง 1 รับเอง โทร 0812345678"
+        a = self.make({m1: order([("ต้มยำกุ้ง", 1, {}), (": ", None, {})],
+                                 phone=TEL, fulfillment="pickup")})
+        r = a.handle(UID, m1)[0]
+        self.assertNotIn("ไม่พบเมนู", r)
+        self.assertIn("ต้มยำกุ้ง x1", r)
+
+    def test_choosing_the_suggestion_replaces_the_sold_out_dish(self):
+        # r-31ed149f: "ชาไทย 1 ก็ได้" kept ชาเย็น and the bot said "ชาเย็น หมด" again
+        m1, m2 = f"ชาเย็น 2 {SEND}", "ชาไทย 1 ก็ได้"
+        a = self.make({m1: order([("ชาเย็น", 2, {})], phone=TEL, address=ADDR,
+                                 fulfillment="delivery"),
+                       m2: order([("ชาเย็น", 2, {}), ("ชาไทย", 1, {})], phone=TEL, address=ADDR,
+                                 fulfillment="delivery")})
+        r = a.handle(UID, m1)[0]
+        self.assertIn("'ชาเย็น' หมด", r)
+        self.assertIn("เมนูที่แนะนำ: ชาไทย", r)
+        r = a.handle(UID, m2)[0]
+        self.assertIn("ชาไทย x1 = 35 บาท", r)
+        self.assertNotIn("ชาเย็น", r)
+
+    def test_answer_to_which_one_keeps_the_qty(self):
+        m1 = "ชา 2 รับเอง โทร 0812345678"
+        a = self.make({m1: order([("ชา", 2, {})], phone=TEL, fulfillment="pickup"),
+                       "ชาไทย": order([("ชาไทย", 2, {})], phone=TEL, fulfillment="pickup")})
+        self.assertIn("หมายถึงเมนูไหน", a.handle(UID, m1)[0])
+        self.assertIn("ชาไทย x2", a.handle(UID, "ชาไทย")[0])
+
+    def test_confirm_typo_gets_a_hint_and_never_submits(self):
+        a = self.make({MSG_ORDER: GOOD_ORDER})
+        a.handle(UID, MSG_ORDER)
+        r = a.handle(UID, "ยืรยัน")[0]
+        self.assertIn('หมายถึง "ยืนยัน"', r)
+        self.assertFalse(self.store.orders_dir.exists())
+        self.assertEqual(self.store.get_draft(UID).state, "CONFIRM")
+        self.assertIn("รับออร์เดอร์", a.handle(UID, "ยืนยัน")[0])
+
+    def test_cancelled_order_id_is_not_reused(self):
+        a = self.make({MSG_ORDER: GOOD_ORDER})
+        a.handle(UID, MSG_ORDER)
+        first = self.store.get_draft(UID).order_id
+        a.handle(UID, "ยกเลิก")
+        a.handle(UID, MSG_ORDER)
+        self.assertNotEqual(self.store.get_draft(UID).order_id, first)
+
+    def test_photo_option_in_addons_is_moved(self):
+        # r-837a3e71: "น้ำใส" as an addon gave "'ต้มยำกุ้ง' ไม่มีตัวเลือก น้ำใส (... น้ำใส/น้ำข้น)"
+        photo = order([("ต้มยำกุ้ง", 1, {"options": {"spice": "เผ็ดน้อย"}, "addons": ["น้ำใส"]}),
+                       ("ข้าวผัดกุ้ง", 2, {"options": {"addon": "ไข่ดาว"}})],
+                      phone=TEL, fulfillment="pickup")
+        a = self.make({PHOTO: photo})
+        r = a.handle(UID, image_b64="aW1n")[0]
+        self.assertNotIn("ไม่มีตัวเลือก", r)
+        self.assertIn("ต้มยำกุ้ง (เผ็ดน้อย, น้ำใส) x1", r)
+        self.assertIn("ข้าวผัดกุ้ง (+ไข่ดาว) x2", r)
+
+    def test_photo_order_with_many_dishes_is_not_a_menu_copy(self):
+        # r-550263d9: a 6-dish order with ข้าวผัดกุ้ง 2 was refused as "you copied the menu"
+        names = ["กะเพราหมูกรอบ", "ข้าวผัดกุ้ง", "ต้มยำกุ้ง", "ข้าวสวย", "ชาไทย"]
+        photo = order([(n, 2 if n == "ข้าวผัดกุ้ง" else 1, {}) for n in names],
+                      phone=TEL, fulfillment="pickup")
+        a = self.make({PHOTO: photo})
+        self.assertIn("สรุปออร์เดอร์", a.handle(UID, image_b64="aW1n")[0])
+        menu_copy = order([(n, 1, {}) for n in names])
+        a = self.make({PHOTO: [json.dumps(menu_copy)] * 3})
+        self.assertIn("ไม่เข้าใจ", a.handle(UID, image_b64="aW1n")[0])
+
+    def test_photo_customer_fields_with_dishes_are_dropped(self):
+        photo = order([("ข้าวสวย", 2, {})], phone="1", address="ข้าวสวย 2", fulfillment="pickup")
+        photo["customer"]["name"] = "กะเพราหมูกรอบ 1"
+        a = self.make({PHOTO: photo})
+        a.handle(UID, image_b64="aW1n")
+        c = self.store.get_draft(UID).customer
+        self.assertEqual((c.name, c.phone, c.address), (None, None, None))
+
+    def test_question_about_unread_photo(self):
+        a = self.make({})
+        r = a.handle(UID, "เข้าใจรายการในรูปว่าอะไร")[0]
+        self.assertIn("ยังอ่านรายการจากรูปไม่ได้", r)
 
 
 if __name__ == "__main__":

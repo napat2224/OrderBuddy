@@ -141,8 +141,9 @@ class TestExtractCheck(unittest.TestCase):
             check(ext("0811111111"))
 
     def test_phone_from_text_history_or_draft(self):
-        extract_check("โทร 081-111-1111", EMPTY, [], False)(ext("0811111111"))
-        extract_check("รับเอง", EMPTY, [{"role": "user", "content": "0822222222"}],
+        tea = draft(("ชาไทย", "F006", 1))          # ชาไทย is kept from the open order
+        extract_check("โทร 081-111-1111", tea, [], False)(ext("0811111111"))
+        extract_check("รับเอง", tea, [{"role": "user", "content": "0822222222"}],
                       False)(ext("0822222222"))
         d = draft(("ชาไทย", "F006", 1))
         d.customer.phone = "0833333333"
@@ -158,7 +159,8 @@ class TestExtractCheck(unittest.TestCase):
 
 class TestNamedItemMustBeInOrder(unittest.TestCase):
     def check(self, text, *items):
-        extract_check(text, EMPTY, [], False)(
+        # the open order holds ข้าวผัดกุ้ง, so the model may keep it without it being named
+        extract_check(text, draft(("ข้าวผัดกุ้ง", "F002", 1)), [], False)(
             ExtractedOrder(items=[{"text": t, "qty": 1} for t in items]))
 
     def test_new_item_ignored_by_the_model_is_rejected(self):
@@ -184,11 +186,19 @@ class TestNamedItemMustBeInOrder(unittest.TestCase):
     def test_photos_are_skipped(self):
         extract_check("ชาเย็น", EMPTY, [], True)(ExtractedOrder(items=[]))
 
+    def test_photo_that_copies_the_menu_is_rejected(self):
+        # log r-7e341e37: the vision model listed all six dishes at qty 1
+        menu = ["กะเพราหมูกรอบ", "ข้าวผัดกุ้ง", "ต้มยำกุ้ง", "ข้าวสวย", "ชาเย็น", "ชาไทย"]
+        with self.assertRaises(DomainError):
+            extract_check("", EMPTY, [], True)(
+                ExtractedOrder(items=[{"text": t, "qty": 1} for t in menu]))
+
 
 class TestPostcode(unittest.TestCase):
     def address(self, text, model_address, draft_address=None):
+        # a model "keeping" an address means the draft already holds it
         draft = DraftOrder(order_id="O", line_user_id="U",
-                           customer={"address": draft_address})
+                           customer={"address": draft_address or model_address})
         order = ExtractedOrder(customer=Customer(address=model_address))
         return clean_extracted(order, text, draft, [], False)[0].customer.address
 
@@ -303,7 +313,7 @@ class TestPrompts(unittest.TestCase):
     """AGENTS.md contract 4: each prompt uses exactly these variables."""
     VARS = {"route": {"open_order", "last_bot"}, "extract": {"menu", "current"},
             "extract_image": {"menu", "current", "caption"},
-            "clarify": {"order", "problems", "suggestions"}, "answer": {"menu"},
+            "clarify": {"order", "problems", "suggestions"}, "answer": {"menu", "shop"},
             "resolve": set()}
 
     def test_variables_match_contract(self):
@@ -322,7 +332,7 @@ class TestPrompts(unittest.TestCase):
                           log_file=Path(tempfile.mkdtemp()) / "c.jsonl").prompts
         for name in ("route", "clarify"):
             self.assertEqual(prompts.get(name).version, 2, name)
-        self.assertEqual(prompts.get("extract_image").version, 3)   # qty null when not written
+        self.assertEqual(prompts.get("extract_image").version, 4)   # never copy the menu
         self.assertEqual(prompts.get("extract").version, 5)
 
 

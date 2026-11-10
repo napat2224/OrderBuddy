@@ -31,6 +31,7 @@ qwen3:4b (one model in RAM, fits an 8 GB Mac), `vision` = qwen3-vl:2b. There is 
 | `app/main.py`, `app/line_adapter.py` | FastAPI + LINE (M17) | เปรม |
 | `app/router.py` | Intent + profile choice: rules, model, guard (M10-M11) | ฟลุ๊ค |
 | `app/checks.py` | Domain checks on model output, reply guard (M5) | ฟลุ๊ค |
+| `app/faq.py` | Common questions answered by code from `data/*.json` (menu, stock, payment, how to order) | ฟลุ๊ค |
 | `app/trace.py`, `app/debug.py` | Model reply log, debug commands | เปรม |
 | `app/tools/__init__.py` | The 5 tools (M6) | บีม |
 | `app/catalog.py`, `data/*.json` | Menu, stock, shop settings | บีม |
@@ -99,7 +100,7 @@ file, the spec doc and the tests in the same commit.
    `pick_profile(route, has_image) -> "fast" | "reasoning" | "vision"`.
 4. **Prompt variables**: `route` ($open_order, $last_bot), `extract` ($menu, $current),
    `extract_image` ($menu, $current, $caption), `clarify` ($order, $problems,
-   $suggestions; not used at runtime, code writes that message), `answer` ($menu),
+   $suggestions; not used at runtime, code writes that message), `answer` ($menu, $shop),
    `resolve` (none).
 5. **Profile names** in `config.yaml`: `router`, `fast`, `reasoning`, `vision`.
 6. **Agent entry point**: `OrderAgent.handle(line_user_id, text="", image_b64=None) -> list[str]`.

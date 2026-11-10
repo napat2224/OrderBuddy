@@ -40,6 +40,9 @@ def _norm(s: str) -> str:
     return re.sub(r"\s+", "", s.lower())
 
 
+TYPO = 0.8   # "กระเพา" 0.83 passes; other dishes stay below ("ข้าวผัดปู" 0.78, "ต้มยำไก่" 0.75)
+
+
 def _score(query: str, candidate: str, is_name: bool = True) -> float:
     q, c = _norm(query), _norm(candidate)
     if q == c:
@@ -47,6 +50,11 @@ def _score(query: str, candidate: str, is_name: bool = True) -> float:
     if q in c:
         return 0.85
     ratio = SequenceMatcher(None, q, c).ratio()
+    if 5 <= len(q) <= len(c) and SequenceMatcher(None, q, c[:len(q)]).ratio() > TYPO:
+        return 0.85                    # a typo of the start of the name: "กระเพา" -> กะเพรา...
+    if c in q and len(q) - len(c) > 8:
+        # "มาม่าคัพ รสต้มยำกุ้งน้ำข้น 60 กรัม" holds ต้มยำกุ้ง but is another product
+        return min(ratio, 0.7)
     if c in q:
         # "ข้าวผัดกุ้งสด" holds a full menu name, but "ข้าวผัดหมู" only holds the short alias
         # "ข้าวผัด" and is another dish: keep it as a suggestion, never a sure match

@@ -20,14 +20,15 @@ import json
 import re
 import traceback
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 from typing import Optional
 
 from harness import Harness, LLMError, ask_structured, build_messages, new_run_id
 
-from . import router, tools
-from .agent import call_tool, resolve_items
+from . import faq, router, tools
+from .agent import MIN_SCORE, call_tool, resolve_items
 from .catalog import catalog, menu_text, stock
-from .checks import clean_extracted, clean_reply, extract_check
+from .checks import CHANGE_WORDS, clean_extracted, clean_reply, extract_check, mentioned
 from .schemas import DraftOrder, ExtractedItem, ExtractedOrder, OrderLine, RouteResult
 from .session import SessionStore
 from .trace import TracedHarness
@@ -44,14 +45,23 @@ MSG = {
     "nothing_to_cancel": "ตอนนี้ยังไม่มีออร์เดอร์ที่ต้องยกเลิกครับ",
     "submitted": "รับออร์เดอร์ {order_id} แล้วครับ ยอดรวม {total} บาท ขอบคุณครับ",
     "sold_out_now": "ขออภัยครับ มีเมนูในออร์เดอร์เพิ่งหมด รบกวนพิมพ์รายการที่ต้องการแก้ได้เลยครับ",
-    "submit_failed": "ขออภัยครับ ยังส่งออร์เดอร์ไม่ได้ ({reason}) รบกวนตรวจสอบรายการอีกครั้งครับ",
+    # never show the raw error to the customer (it showed "FileExistsError: ..."); the
+    # tool_call event in the log keeps the reason
+    "submit_failed": "ขออภัยครับ ยังส่งออร์เดอร์ไม่ได้ รบกวนพิมพ์ \"ยืนยัน\" อีกครั้ง หรือรอพนักงานติดต่อกลับครับ",
+    "nothing_to_confirm": "ตอนนี้ยังไม่มีออร์เดอร์ที่ต้องยืนยันครับ พิมพ์เมนูและจำนวนที่ต้องการได้เลยครับ",
+    "no_open_order": "ตอนนี้ยังไม่มีออร์เดอร์ที่กำลังสั่งครับ พิมพ์เมนูและจำนวนที่ต้องการได้เลยครับ",
+    "confirm_typo": "หมายถึง \"ยืนยัน\" ใช่ไหมครับ ถ้าใช่ พิมพ์ \"ยืนยัน\" อีกครั้งได้เลยครับ",
+    "photo_unread": ("ยังอ่านรายการจากรูปไม่ได้ครับ รบกวนพิมพ์ชื่อเมนูและจำนวน "
+                     "หรือส่งรูปที่เห็นตัวหนังสือชัด ๆ อีกครั้งได้เลยครับ"),
+    "old_order": ("ออร์เดอร์ที่ยืนยันแล้วดูหรือแก้ในแชตนี้ไม่ได้ครับ "
+                  "เดี๋ยวพนักงานจะช่วยตรวจสอบให้ทาง LINE นี้ครับ"),
 }
 
 PROBLEM_TEXT = {
     "fulfillment": "ยังไม่ทราบว่าจะรับเองที่ร้านหรือให้ไปส่ง",
     "phone": "ยังไม่มีเบอร์โทรที่ถูกต้อง (10 หลัก)",
     "address": "ยังไม่มีที่อยู่จัดส่ง (บ้านเลขที่)",
-    "postcode": "ที่อยู่ยังไม่มีรหัสไปรษณีย์",
+    "postcode": "ที่อยู่ยังไม่มีรหัสไปรษณีย์ (5 หลัก)",
 }
 
 
@@ -103,10 +113,13 @@ class OrderAgent:
             self._log_reply(run_id, line_user_id, draft.state, replies)
 
             if closed:                       # submitted or cancelled
+                # the id stays reserved: a cancelled ORD-...-0007 was given to the next order
                 self.store.clear_history(line_user_id)
             else:
                 if draft.items or draft.state != "IDLE":
                     self.store.save_draft(draft)   # greetings/questions leave no empty draft
+                else:
+                    self.store.release_order_id(draft.order_id)
                 self.store.append_history(line_user_id, "user", text or "[รูปภาพ]")
                 for r in replies:
                     self.store.append_history(line_user_id, "assistant", r)
@@ -136,6 +149,7 @@ class OrderAgent:
             call_tool(self.h, "draft_order_manager",
                       {"action": "cancel", "line_user_id": draft.line_user_id},
                       run_id=run_id, allowed=READ_WRITE)
+            draft.state = "IDLE"
             return [MSG["cancelled"].format(order_id=draft.order_id)], True
 
         if intent == "confirm":
@@ -143,12 +157,24 @@ class OrderAgent:
                 return self._done(run_id, draft)
             if not draft.items:
                 draft.state = "IDLE"
-                return [MSG["greet"]], False
+                return [MSG["nothing_to_confirm"]], False
             intent = "modify_order"          # "ok" as an answer to a question
+
+        if prev == "CONFIRM" and intent != "confirm" and not image_b64 and _confirm_typo(text):
+            draft.state = prev                # "ยืรยัน": never submitted, only a hint
+            return [MSG["confirm_typo"]], False
+
+        # "สรุปออเดอร์ของผม", "ร้านรับคนละครึ่งไหม": answered by code from the draft and
+        # data/*.json, whatever the router said, as long as no dish or number is in the text
+        if intent != "question" and not image_b64 and self._plain_question(text):
+            reply = self._code_answer(draft, text)
+            if reply:
+                draft.state = prev
+                return [reply], False
 
         if intent == "question":
             draft.state = prev                # a question never moves the order
-            return [self._answer(run_id, text)], False
+            return [self._code_answer(draft, text) or self._answer(run_id, text)], False
 
         if intent == "other" and not draft.items:
             draft.state = "IDLE"
@@ -160,16 +186,47 @@ class OrderAgent:
             profile = "vision" if image_b64 else "reasoning"
         return self._order_flow(run_id, draft, history, text, image_b64, profile), False
 
+    @staticmethod
+    def _plain_question(text: str) -> bool:
+        """No dish and no number (an order id aside): the message cannot change the order."""
+        t = faq._ORDER_ID.sub("", text or "")
+        return not router.menu_mentions(t) and not re.search(r"\d", t)
+
+    def _code_answer(self, draft: DraftOrder, text: str):
+        """Reply built by code, or None. The open order comes first, then app/faq.py."""
+        if _PHOTO_ASK.search(text or ""):   # "เข้าใจรายการในรูปว่าอะไร": the model made up an answer
+            if not draft.items:
+                return MSG["photo_unread"]
+            return "\n".join([f"ออร์เดอร์ {draft.order_id} ตอนนี้มี", *_item_rows(draft),
+                              "ถ้าไม่ถูกต้อง พิมพ์รายการที่ต้องการแก้ได้เลยครับ"])
+        if faq.wants_order_summary(text) or faq.mentions_old_order(text):
+            if faq.mentions_old_order(text) and draft.order_id not in text:
+                return MSG["old_order"]
+            if not draft.items:
+                return MSG["no_open_order"]
+            if draft.state == "CONFIRM" or (not draft.missing and draft.total):
+                return self._summary(draft)
+            rows = [f"ออร์เดอร์ {draft.order_id} ตอนนี้มี"]
+            rows += [f"- {l.name} x{l.qty}" for l in draft.items]
+            if draft.missing:
+                rows.append("ยังขาดข้อมูลอยู่ พิมพ์ส่วนที่ขาดมาได้เลยครับ")
+            return "\n".join(rows)
+        return faq.faq_answer(text)
+
     # ======================================== EXTRACT -> RESOLVE -> PRICE -> ADDRESS
     def _order_flow(self, run_id, draft, history, text, image_b64, profile) -> list[str]:
         self._goto(run_id, draft, "EXTRACT")
-        ext = self._extract(run_id, draft, history, text, image_b64, profile)
+        if not image_b64 and draft.items and _ANY_IS_FINE.search(text):
+            ext = self._from_draft(run_id, draft)
+        else:
+            ext = self._extract(run_id, draft, history, text, image_b64, profile)
         if ext is None:                       # safe failure after retries
             self._goto(run_id, draft, "CLARIFY")
             return [MSG["not_understood"]]
         self._merge_customer(draft, ext)
         if not image_b64:
             _drop_guessed_qty(ext.items, text, draft)
+            _drop_decimal_qty(ext.items, text)
         ext.items = [it for it in ext.items if it.qty != 0]    # qty 0 = customer removed it
         if not ext.items:
             draft.items, draft.missing = [], ["items"]
@@ -215,7 +272,7 @@ class OrderAgent:
         draft.missing = missing
         if missing:
             self._goto(run_id, draft, "CLARIFY")
-            return [self._clarify(problems, suggestions)]
+            return [self._clarify(problems, suggestions, _item_rows(draft, skip_stock=True))]
         self._goto(run_id, draft, "CONFIRM")
         return [self._summary(draft)]
 
@@ -248,9 +305,25 @@ class OrderAgent:
         if not res.ok:                        # the harness already logged safe_failure
             return None
         order, dropped = clean_extracted(res.value, text, draft, history[-6:], bool(image_b64))
+        if not image_b64:
+            dropped += _keep_unmentioned(order, draft, text)
+            dropped += _replace_sold_out(order, draft, text)
         self.h.log.write("extract", run_id=run_id, prompt=p.id, profile=res.profile_used,
                          attempts=res.attempts, errors=res.errors, dropped=dropped,
                          result=order.model_dump())
+        return order
+
+    def _from_draft(self, run_id, draft: DraftOrder) -> ExtractedOrder:
+        """"อะไรก็ได้" answers an option question: keep the order as it is (a wrong option was
+        already left out). The model invented ': ' and once replaced the order with ข้าวสวย x1."""
+        order = ExtractedOrder(
+            items=[ExtractedItem(text=l.name, qty=None if _qty_unknown(draft, l) else l.qty,
+                                 options=l.options, addons=l.addons, note=l.note)
+                   for l in draft.items],
+            customer=draft.customer.model_dump(include={"name", "phone", "address"}),
+            fulfillment=draft.fulfillment)
+        self.h.log.write("extract", run_id=run_id, prompt=None, profile="code", attempts=0,
+                         errors=[], dropped=[], result=order.model_dump())
         return order
 
     @staticmethod
@@ -273,22 +346,26 @@ class OrderAgent:
             sku = mapping.get(i)
             if sku not in menu:                       # model answer re-checked by code
                 missing.append(f"item:{it.text}")
-                problems.append(f"ไม่พบเมนู '{it.text}'")
                 r = call_tool(self.h, "product_search", {"query": it.text, "top_k": 3},
                               run_id=run_id)
-                suggestions += [x["name"] for x in r.get("result") or []
+                hits = r.get("result") or []
+                close = [x["name"] + (" (หมด)" if stock().get(x["sku"], 0) <= 0 else "")
+                         for x in hits if x["score"] >= MIN_SCORE]
+                if len(close) > 1:                    # "ชา": ชาเย็น or ชาไทย, ask which one
+                    problems.append(f"'{it.text}' หมายถึงเมนูไหนครับ: {', '.join(close)}")
+                    continue
+                problems.append(f"ไม่พบเมนู '{it.text}'")
+                suggestions += [x["name"] for x in hits
                                 if x.get("sku") not in in_order and stock().get(x["sku"], 0) > 0]
                 continue
             m = menu[sku]
-            bad_opts = {k: v for k, v in it.options.items() if v not in m.options.get(k, [])}
-            bad_addons = [a for a in it.addons if a not in m.addons]
-            if bad_opts or bad_addons:
+            options, addons, note, bad = _sort_options(m, it)
+            if bad:
                 missing.append(f"option:{sku}")
-                problems.append(f"'{m.name}' ไม่มีตัวเลือก {list(bad_opts.values()) + bad_addons}")
+                problems.append(_option_problem(m, bad))
             # qty None: placeholder 1, marked missing, so it is never priced or summarised
-            line = OrderLine(sku=sku, name=m.name, qty=it.qty or 1, note=it.note,
-                             options={k: v for k, v in it.options.items() if k not in bad_opts},
-                             addons=[a for a in it.addons if a in m.addons])
+            line = OrderLine(sku=sku, name=m.name, qty=it.qty or 1, note=note,
+                             options=options, addons=addons)
             lines.append(line)
             if it.qty is None:
                 missing.append(f"qty:{sku}")
@@ -318,18 +395,26 @@ class OrderAgent:
 
     # ------------------------------------------------------- CLARIFY / answer
     @staticmethod
-    def _clarify(problems, suggestions) -> str:
+    def _clarify(problems, suggestions, items=()) -> str:
         """Written by code: the customer must see exactly what is wrong. With a model, a postcode
-        the customer had sent was reported as missing and invented order statuses appeared."""
+        the customer had sent was reported as missing and invented order statuses appeared.
+        The current items are listed too: "ข้าวผัดเหลือ 1" got the same reply as before, so
+        the customer could not see that the change was made (or, in that log, later lost)."""
         rows = ["ออร์เดอร์ยังไม่ครบครับ", *(f"- {p}" for p in problems)]
         if suggestions:
             rows.append("เมนูที่แนะนำ: " + ", ".join(suggestions))
+        if items:
+            rows.append("ตอนนี้ในออร์เดอร์:")
+            rows += items
         rows.append("รบกวนแจ้งกลับด้วยนะครับ")
         return "\n".join(rows)
 
     def _answer(self, run_id, text) -> str:
         p = self.h.prompts.get("answer")
-        return self._say(run_id, "fast", p.id, p.render(menu=menu_text()), text,
+        left = stock()
+        menu = "\n".join(line + (" (หมด)" if left.get(sku, 0) <= 0 else "")
+                         for sku, line in zip(catalog(), menu_text().splitlines()))
+        return self._say(run_id, "fast", p.id, p.render(menu=menu, shop=faq.shop_facts()), text,
                          "ขอโทษครับ ตอบคำถามนี้ไม่ได้ เดี๋ยวพนักงานจะตอบกลับครับ")
 
     def _say(self, run_id, profile, prompt_id, system, user, fallback) -> str:
@@ -368,7 +453,7 @@ class OrderAgent:
             draft.state = "CONFIRM"
             if "out_of_stock" in r["error"]:
                 return [MSG["sold_out_now"]], False
-            return [MSG["submit_failed"].format(reason=r["error"][:80])], False
+            return [MSG["submit_failed"]], False
         return [MSG["submitted"].format(order_id=r["result"]["order_id"],
                                         total=r["result"]["total"])], True
 
@@ -398,9 +483,12 @@ def _drop_guessed_qty(items: list[ExtractedItem], text: str, draft: DraftOrder) 
     names = {n: x for x in menu.values() for n in [x.name, *x.aliases]}
     hits = sorted((text.find(n), n) for n in names if n in text)
     ordered = {l.name for l in draft.items if not _qty_unknown(draft, l)}
+    asked = [c[len("item:"):] for c in draft.missing if c.startswith("item:")]
     for it in items:
         if it.qty in (None, 0) or it.text in ordered or it.text not in names:
             continue
+        if any(a and a in it.text for a in asked):
+            continue                  # "ชา 2" -> "ชาไทย": the number came with the question
         own = {names[it.text].name, *names[it.text].aliases}
         pos = [(p, n) for p, n in hits if n in own]
         if not pos:
@@ -412,6 +500,128 @@ def _drop_guessed_qty(items: list[ExtractedItem], text: str, draft: DraftOrder) 
             segment += " " + text[:pos[0][0]]
         if not _QTY.search(segment):
             it.qty = None
+
+
+_DECIMAL = r"\s*(?:x|จำนวน)?\s*\d*\.\d+"
+
+
+def _drop_decimal_qty(items: list[ExtractedItem], text: str) -> None:
+    """"ชาไทย 1.5 แก้ว" was ordered as 1 without asking; a decimal means: ask how many."""
+    menu = catalog()
+    for it in items:
+        m = next((x for x in menu.values() if it.text in (x.name, *x.aliases)), None)
+        names = [m.name, *m.aliases] if m else [it.text]
+        if any(re.search(re.escape(n) + _DECIMAL, text) for n in names):
+            it.qty = None
+
+
+_ANY_IS_FINE = re.compile(r"(?:อะ)?ไร(?:ก็|ก้)ได้|แล้วแต่ร้าน")
+_PHOTO_ASK = re.compile(r"ในรูป|จากรูป|รูปนี้|รูปที่ส่ง|รูปเมื่อกี้")
+# a dish the newest message does not name keeps its line, unless the customer is changing
+# the order in a way that needs no dish name ("เอาแค่ชาไทย", "เปลี่ยนเป็น...")
+_KEEP_UNLESS = (*CHANGE_WORDS, "แค่", "เหลือ", "เฉพาะ")
+
+
+def _sku_of(text: str) -> Optional[str]:
+    return next((sku for sku, x in catalog().items() if text in (x.name, *x.aliases)), None)
+
+
+def _keep_unmentioned(order: ExtractedOrder, draft: DraftOrder, text: str) -> list[str]:
+    """The model may only change dishes the newest message names. After "ข้าวผัดเหลือ 1",
+    an address message brought back qty 2 from history; "เอาไรก็ได้" dropped all lines but
+    ข้าวสวย. Lines without a known qty are left to the model (the customer may answer "2").
+    Changes order.items in place; returns notes for the "extract" log."""
+    said = _squash(text)
+    may_drop = any(w in said for w in _KEEP_UNLESS)
+    if len(draft.items) == 1 and _bare_qty(text):
+        return []                     # "2" / "เอา0อัน" with one dish: that dish's new quantity
+    notes = []
+    for line in draft.items:
+        if _qty_unknown(draft, line) or mentioned(line.name, said):
+            continue
+        same = [it for it in order.items if _sku_of(it.text) == line.sku]
+        for it in same:
+            if it.qty != line.qty and not (it.qty == 0 and may_drop):
+                notes.append(f"restored {line.name} qty {it.qty} -> {line.qty}")
+                it.qty = line.qty
+        if not same and not may_drop:
+            notes.append(f"restored {line.name} x{line.qty}")
+            order.items.append(ExtractedItem(text=line.name, qty=line.qty, options=line.options,
+                                             addons=line.addons, note=line.note))
+    return notes
+
+
+def _replace_sold_out(order: ExtractedOrder, draft: DraftOrder, text: str) -> list[str]:
+    """"ชาเย็น หมด, แนะนำ ชาไทย" -> "ชาไทย 1 ก็ได้": the customer took the other dish, but the
+    model kept ชาเย็น too and the bot said "ชาเย็น หมด" again. A sold-out dish the newest
+    message does not name leaves when it names another dish of the same category."""
+    menu, left, said = catalog(), stock(), _squash(text)
+    notes = []
+    for code in draft.missing:
+        sku = code[len("stock:"):] if code.startswith("stock:") else None
+        if sku not in menu or left.get(sku, 0) > 0 or mentioned(menu[sku].name, said):
+            continue
+        others = [s for s in map(_sku_of, (it.text for it in order.items))
+                  if s and s != sku and menu[s].category == menu[sku].category
+                  and mentioned(menu[s].name, said)]
+        if others:
+            order.items[:] = [it for it in order.items if _sku_of(it.text) != sku]
+            notes.append(f"{menu[sku].name} sold out, replaced by {menu[others[0]].name}")
+    return notes
+
+
+def _sort_options(m, it: ExtractedItem) -> tuple[dict, list, str, list]:
+    """Put each value where the dish has it. The vision model wrote "น้ำใส" as an addon and
+    the customer read "'ต้มยำกุ้ง' ไม่มีตัวเลือก น้ำใส (เลือกได้: ... น้ำใส/น้ำข้น)"; it also wrote
+    {"addon": "ไข่ดาว"}. A value under a key the dish does not have ({"note": "ไม่ต้องหุง"})
+    is a free request, not an error. Returns options, addons, note, bad values."""
+    options, addons, notes, bad = {}, [], [it.note], []
+    for key, value in [*it.options.items(), *((None, a) for a in it.addons)]:
+        own = next((k for k, vals in m.options.items() if value in vals), None)
+        if own and own not in options:
+            options[own] = value
+        elif value in m.addons:
+            if value not in addons:
+                addons.append(value)
+        elif key is not None and key not in m.options:
+            notes.append(value)
+        else:
+            bad.append(value)
+    return options, addons, " ".join(n for n in notes if n).strip(), bad
+
+
+def _item_rows(draft: DraftOrder, skip_stock: bool = False) -> list[str]:
+    """"- ข้าวผัดกุ้ง x1" for every line; a sold-out line is already listed as a problem."""
+    rows = []
+    for l in draft.items:
+        if skip_stock and f"stock:{l.sku}" in draft.missing:
+            continue
+        qty = "(ยังไม่ระบุจำนวน)" if _qty_unknown(draft, l) else f"x{l.qty}"
+        rows.append(f"- {l.name} {qty}")
+    return rows
+
+
+def _bare_qty(text: str) -> bool:
+    """A short message with a quantity and no address or phone ("2", "เพิ่มเป็น 3 จาน")."""
+    return len(_squash(text)) <= 20 and not _NOT_ITEM.search(text) and bool(_QTY.search(text))
+
+
+def _confirm_typo(text: str) -> bool:
+    """"ยืรยัน" is close to ยืนยัน but is not a confirm word (M19), so it gets a hint."""
+    t = _squash(text)
+    return 3 <= len(t) <= 8 and t != "ยืนยัน" and \
+        SequenceMatcher(None, t, "ยืนยัน").ratio() >= 0.6
+
+
+def _squash(s: str) -> str:
+    return re.sub(r"\s+", "", s or "")
+
+
+def _option_problem(m, bad: list[str]) -> str:
+    """Readable for the customer: values joined, and what the dish does offer."""
+    allowed = ["/".join(v) for v in m.options.values()] + [f"+{a}" for a in m.addons]
+    tail = f" (เลือกได้: {', '.join(allowed)})" if allowed else " (เมนูนี้ไม่มีตัวเลือกเพิ่ม)"
+    return f"'{m.name}' ไม่มีตัวเลือก {', '.join(bad)}{tail}"
 
 
 def _qty_unknown(draft: DraftOrder, line: OrderLine) -> bool:

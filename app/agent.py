@@ -11,12 +11,14 @@ loop fails, the customer is asked to choose.
 """
 from __future__ import annotations
 
+import re
 from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from harness import ask_structured, build_messages, execute, tool_defs, tool_message
 
+from .catalog import catalog
 from .schemas import SKU_PATTERN, ExtractedItem
 from .tools import MODEL_TOOLS
 
@@ -69,6 +71,15 @@ def resolve_with_model(h, items: list[ExtractedItem], *, run_id: str,
     return {r.index: r.sku for r in res.value.items if 0 <= r.index < len(items)}
 
 
+def _generic(text: str, skus: set[str]) -> bool:
+    """The customer's word is part of the name of every candidate, so it cannot pick one."""
+    menu = catalog()
+    q = re.sub(r"\s+", "", text.lower())
+    return bool(q) and all(
+        any(q in re.sub(r"\s+", "", n.lower()) for n in (menu[s].name, *menu[s].aliases))
+        for s in skus if s in menu)
+
+
 def resolve_items(h, items: list[ExtractedItem], *, run_id: str, use_model: bool = True,
                   max_rounds: int = 4) -> dict[int, Optional[str]]:
     """{item index: sku, or None when the customer has to be asked}.
@@ -92,7 +103,11 @@ def resolve_items(h, items: list[ExtractedItem], *, run_id: str, use_model: bool
         answer = resolve_with_model(h, [items[i] for i in order], run_id=run_id,
                                     max_rounds=max_rounds) or {}
         for pos, sku in answer.items():
-            if sku in unclear[order[pos]]:
+            if sku in unclear[order[pos]] and _generic(items[order[pos]].text, unclear[order[pos]]):
+                # "ชา" fits ชาเย็น and ชาไทย alike: the model picked ชาไทย because ชาเย็น was
+                # sold out, and the customer was never asked. Nothing in the words decides it.
+                rejected.append(f"{items[order[pos]].text}: {sku} (generic)")
+            elif sku in unclear[order[pos]]:
                 mapping[order[pos]] = sku
             elif sku:
                 rejected.append(f"{items[order[pos]].text}: {sku}")

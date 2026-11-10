@@ -58,6 +58,9 @@ class SessionStore:
         self.orders_dir = base / "orders"
         self._locks: dict[str, threading.Lock] = defaultdict(threading.Lock)
         self._id_lock = threading.Lock()
+        # ids handed out but not on disk yet: a new draft is saved only after the reply, so two
+        # customers writing at once both got ORD-...-0007 and the second "ยืนยัน" failed
+        self._reserved: set[str] = set()
 
     # ------------------------------------------------------------ locking
     def lock(self, line_user_id: str) -> threading.Lock:
@@ -96,10 +99,11 @@ class SessionStore:
         """Draft -> FinalOrder (confirmed). Removes the draft.
         The caller (state machine / tool) must already have checked that the
         customer confirmed and that draft.missing is empty."""
+        path = self._order_path(draft.order_id)
+        while path.exists():              # id taken (e.g. by an older draft): take a new one
+            draft.order_id = self.new_order_id()
+            path = self._order_path(draft.order_id)
         order = FinalOrder.from_draft(draft)
-        path = self._order_path(order.order_id)
-        if path.exists():
-            raise FileExistsError(f"order {order.order_id} already submitted")
         _write_json(path, order.model_dump(mode="json"))
         self.delete_draft(draft.line_user_id)
         return order
@@ -115,7 +119,7 @@ class SessionStore:
         with self._id_lock:
             day = datetime.now().strftime("%Y%m%d")
             prefix = f"ORD-{day}-"
-            used = set()
+            used = {x for x in self._reserved if x.startswith(prefix)}
             for d in (self.orders_dir,):
                 if d.exists():
                     used |= {p.stem for p in d.glob(f"{prefix}*.json")}
@@ -125,7 +129,14 @@ class SessionStore:
                     if oid.startswith(prefix):
                         used.add(oid)
             n = max((int(x.rsplit("-", 1)[1]) for x in used), default=0) + 1
-            return f"{prefix}{n:04d}"
+            order_id = f"{prefix}{n:04d}"
+            self._reserved.add(order_id)
+            return order_id
+
+    def release_order_id(self, order_id: str) -> None:
+        """The draft was never saved (a greeting or question): its id may be used again."""
+        with self._id_lock:
+            self._reserved.discard(order_id)
 
     # ------------------------------------------------------------ history
     def _history_path(self, uid: str) -> Path:
